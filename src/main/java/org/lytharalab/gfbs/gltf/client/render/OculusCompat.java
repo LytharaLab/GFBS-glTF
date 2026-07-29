@@ -7,6 +7,10 @@ import java.lang.reflect.Method;
 
 /** Optional Oculus/Iris API bridge. No Oculus class is linked on servers or when the mod is absent. */
 final class OculusCompat {
+    private static final String[] API_CLASSES = {
+        "net.irisshaders.iris.api.v0.IrisApi",
+        "net.coderbot.iris.api.v0.IrisApi"
+    };
     private static final boolean INSTALLED = ModList.get().isLoaded("oculus") || ModList.get().isLoaded("iris");
     private static boolean resolved;
     private static Object api;
@@ -41,17 +45,21 @@ final class OculusCompat {
         if (resolved) return;
         resolved = true;
         if (!INSTALLED) return;
-        try {
-            Class<?> type = Class.forName("net.irisshaders.iris.api.v0.IrisApi", false,
-                OculusCompat.class.getClassLoader());
-            api = type.getMethod("getInstance").invoke(null);
-            shaderPackInUse = type.getMethod("isShaderPackInUse");
-            shadowPass = type.getMethod("isRenderingShadowPass");
-        } catch (ReflectiveOperationException | LinkageError exception) {
-            GFBSglTF.LOGGER.warn("Oculus/Iris was detected but its v0 compatibility API is unavailable; "
-                + "GFBS:glTF will keep using Minecraft's vanilla entity-shader path without LabPBR companions",
-                exception);
-            api = null;
+        Throwable failure = null;
+        for (String className : API_CLASSES) {
+            try {
+                Class<?> type = Class.forName(className, false, OculusCompat.class.getClassLoader());
+                api = type.getMethod("getInstance").invoke(null);
+                shaderPackInUse = type.getMethod("isShaderPackInUse");
+                shadowPass = type.getMethod("isRenderingShadowPass");
+                return;
+            } catch (ReflectiveOperationException | LinkageError exception) {
+                failure = exception;
+            }
         }
+        GFBSglTF.LOGGER.warn("Oculus/Iris was detected but its v0 compatibility API is unavailable; "
+            + "GFBS:glTF will keep using Minecraft's vanilla entity-shader path without LabPBR companions",
+            failure);
+        api = null;
     }
 }

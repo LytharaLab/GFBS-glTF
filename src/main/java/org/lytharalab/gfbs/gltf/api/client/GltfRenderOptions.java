@@ -17,6 +17,7 @@ public final class GltfRenderOptions {
     private LightMode lightMode = LightMode.WORLD;
     private boolean frustumCulling = true;
     private boolean occlusionCulling;
+    private boolean castShadows = true;
     private double maxRenderDistance;
     private float alpha = 1.0f;
     private RenderType overrideRenderType;
@@ -29,6 +30,7 @@ public final class GltfRenderOptions {
     public LightMode lightMode() { return lightMode; }
     public boolean frustumCulling() { return frustumCulling; }
     public boolean occlusionCulling() { return occlusionCulling; }
+    public boolean castShadows() { return castShadows; }
     public double maxRenderDistance() { return maxRenderDistance; }
     public float alpha() { return alpha; }
     public RenderType overrideRenderType() { return overrideRenderType; }
@@ -54,6 +56,16 @@ public final class GltfRenderOptions {
 
     public GltfRenderOptions occlusionCulling(boolean enabled) {
         occlusionCulling = enabled;
+        return this;
+    }
+
+    /**
+     * Controls participation in Oculus/Iris shadow-map rendering.
+     *
+     * <p>Enabled by default. This setting has no effect on Minecraft's vanilla blob shadows.</p>
+     */
+    public GltfRenderOptions castShadows(boolean enabled) {
+        castShadows = enabled;
         return this;
     }
 
@@ -115,6 +127,7 @@ public final class GltfRenderOptions {
         copy.lightMode = lightMode;
         copy.frustumCulling = frustumCulling;
         copy.occlusionCulling = occlusionCulling;
+        copy.castShadows = castShadows;
         copy.maxRenderDistance = maxRenderDistance;
         copy.alpha = alpha;
         copy.overrideRenderType = overrideRenderType;

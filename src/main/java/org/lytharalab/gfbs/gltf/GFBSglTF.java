@@ -10,6 +10,6 @@ public final class GFBSglTF {
     public static final Logger LOGGER = LogUtils.getLogger();
 
     public GFBSglTF() {
-        LOGGER.info("Initializing GFBS:glTF 1.0.0");
+        LOGGER.info("Initializing GFBS:glTF 1.1.0");
     }
 }
