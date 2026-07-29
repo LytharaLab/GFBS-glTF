@@ -40,6 +40,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Universal renderer. Both vanilla and shader-pack paths use Minecraft's original entity shaders;
  * shader packs additionally receive lazily-created LabPBR companion textures.
+ *
+ * <p>Oculus/Iris shadow rendering deliberately uses a separate caster path. Camera-space
+ * frustum/occlusion results and user RenderType overrides belong to the color pass and must not
+ * suppress shadow geometry.</p>
  */
 public final class EntityGltfRenderer {
     private static final Set<RenderType> WARNED_TYPES = ConcurrentHashMap.newKeySet();
@@ -62,21 +66,25 @@ public final class EntityGltfRenderer {
         GltfAsset asset = instance.asset();
         GltfGpuModel gpu = GltfGpuCache.getInstance().get(asset);
         GltfRenderOptions options = instance.renderOptions();
-        boolean shaderPack = OculusCompat.shadersEnabled();
+        boolean shadowPass = OculusCompat.shadowPass();
+        if (shadowPass && !options.castShadows()) return;
+        boolean shaderPack = !shadowPass && OculusCompat.shadersEnabled();
         ModelPose pose = instance.animations().pose();
         float[] world = PoseTransforms.computeWorldMatrices(pose);
         Matrix4f base = new Matrix4f(poseStack.last().pose());
         List<DrawItem> candidates = collect(
-            instance, gpu, options, context, shaderPack, pose, world, base
+            instance, gpu, options, context, shaderPack, shadowPass, pose, world, base
         );
         GltfOcclusionCuller occlusion = GltfOcclusionCuller.INSTANCE;
-        if (options.occlusionCulling() && context != null && context.projection() != null) {
+        boolean useOcclusion = !shadowPass && options.occlusionCulling()
+            && context != null && context.projection() != null;
+        if (useOcclusion) {
             occlusion.beginFrame();
         }
 
         List<DrawItem> visible = new ArrayList<>(candidates.size());
         for (DrawItem item : candidates) {
-            if (!options.occlusionCulling() || item.primitive.hasDynamicGeometry()
+            if (!useOcclusion || item.primitive.hasDynamicGeometry()
                 || occlusion.wasVisible(item.queryKey)) {
                 visible.add(item);
             }
@@ -87,7 +95,8 @@ public final class EntityGltfRenderer {
                 ? item.depth : 0.0));
 
         for (DrawItem item : visible) {
-            int light = options.lightMode() == GltfRenderOptions.LightMode.FULLBRIGHT
+            int light = shadowPass
+                || options.lightMode() == GltfRenderOptions.LightMode.FULLBRIGHT
                 || isEmissive(item.material) ? LightTexture.FULL_BRIGHT : packedLight;
             emitPrimitive(
                 buffers.getBuffer(item.renderType),
@@ -105,7 +114,7 @@ public final class EntityGltfRenderer {
             );
         }
 
-        if (options.occlusionCulling() && context != null && context.projection() != null) {
+        if (useOcclusion) {
             GltfOcclusionCuller.State state = GltfOcclusionCuller.beginQueries();
             try {
                 Matrix4f projection = context.projection();
@@ -123,8 +132,8 @@ public final class EntityGltfRenderer {
 
     private static List<DrawItem> collect(GltfInstance instance, GltfGpuModel gpu,
                                           GltfRenderOptions options, GltfRenderContext context,
-                                          boolean shaderPack, ModelPose pose, float[] world,
-                                          Matrix4f base) {
+                                          boolean shaderPack, boolean shadowPass, ModelPose pose,
+                                          float[] world, Matrix4f base) {
         GltfAsset asset = instance.asset();
         List<DrawItem> items = new ArrayList<>();
         GltfScene scene = asset.scenes().get(instance.scene());
@@ -150,16 +159,20 @@ public final class EntityGltfRenderer {
                 if (morphWeights == null) morphWeights = mesh.defaultMorphWeights();
                 for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
                     GltfPrimitive primitive = mesh.primitives().get(primitiveIndex);
+                    if (shadowPass && !isTriangleMode(primitive.mode())) continue;
                     GltfRenderPart part = new GltfRenderPart(
                         nodeIndex, node.name(), meshIndex, primitiveIndex, primitive.material()
                     );
                     if (!options.partFilter().test(part)) continue;
-                    if (!GltfPrimitiveCuller.isVisible(primitive, model, context, options)) continue;
+                    if (!shadowPass
+                        && !GltfPrimitiveCuller.isVisible(primitive, model, context, options)) continue;
                     GltfMaterial material = asset.materials().get(primitive.material());
                     ResourceLocationHolder texture = new ResourceLocationHolder(
                         gpu.materialTexture(primitive.material(), shaderPack)
                     );
-                    RenderType renderType = resolveRenderType(part, primitive, material, texture, options);
+                    RenderType renderType = shadowPass
+                        ? resolveShadowRenderType(material, texture, options)
+                        : resolveRenderType(part, primitive, material, texture, options);
                     double depth = transformDepth(
                         model,
                         primitive.bounds().centerX(),
@@ -179,6 +192,19 @@ public final class EntityGltfRenderer {
             for (int i = children.length - 1; i >= 0; i--) pending.push(children[i]);
         }
         return items;
+    }
+
+    private static RenderType resolveShadowRenderType(GltfMaterial material,
+                                                      ResourceLocationHolder texture,
+                                                      GltfRenderOptions options) {
+        boolean cull = switch (options.cullMode()) {
+            case FORCE_CULL -> true;
+            case FORCE_NO_CULL -> false;
+            case AUTO -> !material.doubleSided();
+        };
+        return material.alphaMode() == AlphaMode.OPAQUE
+            ? GltfRenderTypes.solid(texture.value, cull)
+            : GltfRenderTypes.cutout(texture.value, cull);
     }
 
     private static RenderType resolveRenderType(GltfRenderPart part, GltfPrimitive primitive,

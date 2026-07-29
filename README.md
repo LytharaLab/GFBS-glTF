@@ -10,14 +10,14 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 - [Releases](https://github.com/LytharaLab/GFBS-glTF/releases)
 - [Issue tracker](https://github.com/LytharaLab/GFBS-glTF/issues)
 - [Pull requests](https://github.com/LytharaLab/GFBS-glTF/pulls)
-- [1.0 API guide](docs/1.0-API.md)
+- [1.x API guide](docs/1.0-API.md)
 
 ## Status and compatibility
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.0.0` |
-| Public API | `1.0` |
+| GFBS: glTF | `1.1.0` |
+| Public API | `1.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -37,6 +37,7 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Server-authoritative animation synchronization for entities, block entities, and custom targets.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
 - Per-instance, per-node, and per-part RenderType selection with a validated custom RenderType builder.
+- Oculus/Iris shadow-map rendering with a dedicated depth-writing caster path.
 - Optional bounds, cached voxel, and current-pose precise collision.
 - Extensible model importer registry for third-party formats.
 - Defensive resource limits and namespace-local resource resolution.
@@ -131,15 +132,16 @@ Close an instance when it is no longer used, especially when collision has been 
 instance.close();
 ```
 
-See the [GFBS: glTF 1.0 API guide](docs/1.0-API.md) for loading, animation, rendering, synchronization, importers, culling, RenderTypes, collision, and migration details.
+See the [GFBS: glTF 1.x API guide](docs/1.0-API.md) for loading, animation, rendering, synchronization, importers, culling, RenderTypes, collision, and migration details.
 
 ## Rendering policy
 
-GFBS: glTF 1.0 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY` and the original entity shaders.
+GFBS: glTF 1.1 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY` and the original entity shaders.
 
 - Without a shader pack, base textures are rendered with Minecraft entity lighting.
 - With an active Oculus or Iris shader pack, the same entity rendering path remains in use and LabPBR companion textures are created lazily when supported.
-- Shader-pack lighting, shadows, and deferred rendering remain the responsibility of the active shader pack.
+- During an Oculus/Iris shadow pass, GFBS switches to a depth-writing caster path and bypasses color-pass culling and custom RenderType overrides.
+- The active shader pack still controls shadow resolution, distance, filtering, and whether block entities participate in its shadow pass.
 
 This keeps the no-shader path compatible with Minecraft's renderer and avoids bundling a second PBR shader implementation.
 
@@ -157,7 +159,7 @@ src/test/java/                                 Unit tests
 
 ## Acknowledgements
 
-GFBS: glTF 1.0 draws on and incorporates portions of code from the **ModelLoader** mod by Bilibili creator [洛谔谔](https://space.bilibili.com/3546888156481679), formerly known as `_二千`.
+GFBS: glTF draws on and incorporates portions of code from the **ModelLoader** mod by Bilibili creator [洛谔谔](https://space.bilibili.com/3546888156481679), formerly known as `_二千`.
 
 ## Contributing
 

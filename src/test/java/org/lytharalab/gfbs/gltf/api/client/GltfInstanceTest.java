@@ -16,6 +16,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GltfInstanceTest {
     @Test
+    void copiesShadowCastingOption() {
+        GltfRenderOptions options = new GltfRenderOptions().castShadows(false);
+
+        assertFalse(options.castShadows());
+        assertFalse(options.copy().castShadows());
+        assertTrue(new GltfRenderOptions().castShadows());
+    }
+
+    @Test
     void controlsNodeSubtreeVisibilityWithoutMutatingTheAsset() {
         GltfInstance instance = new GltfInstance(asset());
 
