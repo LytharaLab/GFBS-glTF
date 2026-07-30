@@ -64,7 +64,7 @@ public final class GltfRenderTypes {
 
     public static RenderType solid(ResourceLocation texture, boolean cull) {
         return standard("solid", texture, cull, GameRenderer::getRendertypeEntitySolidShader,
-            NO_TRANSPARENCY, ORDER_SOLID, true, VertexFormat.Mode.QUADS);
+            NO_TRANSPARENCY, ORDER_SOLID, true, VertexFormat.Mode.TRIANGLES);
     }
 
     public static RenderType cutout(ResourceLocation texture, boolean cull) {
@@ -72,7 +72,7 @@ public final class GltfRenderTypes {
             ? GameRenderer::getRendertypeEntityCutoutShader
             : GameRenderer::getRendertypeEntityCutoutNoCullShader;
         return standard("cutout", texture, cull, shader, NO_TRANSPARENCY, ORDER_CUTOUT, true,
-            VertexFormat.Mode.QUADS);
+            VertexFormat.Mode.TRIANGLES);
     }
 
     public static RenderType translucent(ResourceLocation texture, boolean cull) {
@@ -80,7 +80,7 @@ public final class GltfRenderTypes {
             ? GameRenderer::getRendertypeEntityTranslucentCullShader
             : GameRenderer::getRendertypeEntityTranslucentShader;
         return standard("translucent", texture, cull, shader, TRANSLUCENT,
-            ORDER_TRANSLUCENT, false, VertexFormat.Mode.QUADS);
+            ORDER_TRANSLUCENT, false, VertexFormat.Mode.TRIANGLES);
     }
 
     public static RenderType lines(ResourceLocation texture, boolean translucent) {
@@ -160,7 +160,7 @@ public final class GltfRenderTypes {
         private boolean sortOnUpload;
         private int bufferSize = BUFFER_SIZE;
         private int sortOrder = ORDER_CUSTOM;
-        private VertexFormat.Mode mode = VertexFormat.Mode.QUADS;
+        private VertexFormat.Mode mode = VertexFormat.Mode.TRIANGLES;
 
         private Builder(String name) {
             this.name = Objects.requireNonNull(name, "name");
@@ -197,8 +197,10 @@ public final class GltfRenderTypes {
         public Builder sortOrder(int value) { sortOrder = value; return this; }
         public Builder mode(VertexFormat.Mode value) {
             mode = Objects.requireNonNull(value, "mode");
-            if (mode != VertexFormat.Mode.QUADS && mode != VertexFormat.Mode.TRIANGLES) {
-                throw new IllegalArgumentException("GFBS RenderTypes support QUADS or TRIANGLES");
+            if (mode != VertexFormat.Mode.TRIANGLES) {
+                throw new IllegalArgumentException(
+                    "GFBS triangle RenderTypes require TRIANGLES; QUADS would create degenerate geometry"
+                );
             }
             return this;
         }
