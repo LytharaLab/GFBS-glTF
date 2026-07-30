@@ -16,7 +16,7 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.1.0` |
+| GFBS: glTF | `1.1.1` |
 | Public API | `1.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
@@ -37,6 +37,8 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Server-authoritative animation synchronization for entities, block entities, and custom targets.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
 - Per-instance, per-node, and per-part RenderType selection with a validated custom RenderType builder.
+- Native triangle submission for glTF triangle, strip, and fan primitives—no degenerate quad padding.
+- Forge static block/item model loading through `gfbs_gltf:gltf`.
 - Oculus/Iris shadow-map rendering with a dedicated depth-writing caster path.
 - Optional bounds, cached voxel, and current-pose precise collision.
 - Extensible model importer registry for third-party formats.
@@ -132,11 +134,46 @@ Close an instance when it is no longer used, especially when collision has been 
 instance.close();
 ```
 
+## Static Forge block and item models
+
+Use the `gfbs_gltf:gltf` geometry loader for glTF or GLB models that should be baked once at
+resource-load time and do not need animation playback:
+
+```json
+{
+  "loader": "gfbs_gltf:gltf",
+  "model": "example:models/block/console.glb",
+  "textures": {
+    "particle": "example:block/console",
+    "material_0": "example:block/console"
+  },
+  "material_textures": {
+    "0": "#material_0"
+  },
+  "render_type": "minecraft:cutout",
+  "scale": 1.0,
+  "translation": [0.0, 0.0, 0.0],
+  "flip_v": false,
+  "shade": true,
+  "automatic_culling": false
+}
+```
+
+Place this JSON at `assets/example/models/block/console.json`, the GLB at
+`assets/example/models/block/console.glb`, and reference `example:block/console` from the
+blockstate or item model. The loader bakes the selected scene's default pose, including node
+transforms, default morph weights, and rest-pose skinning. Animation clips are intentionally not
+executed on this path.
+
+Every atlas texture used by the glTF material must be declared in the model JSON. Map textures by
+material index or glTF material name through `material_textures`; `material_0`, material-name,
+`texture`, and `particle` slots are used as fallbacks. The API guide documents every option.
+
 See the [GFBS: glTF 1.x API guide](docs/1.0-API.md) for loading, animation, rendering, synchronization, importers, culling, RenderTypes, collision, and migration details.
 
 ## Rendering policy
 
-GFBS: glTF 1.1 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY` and the original entity shaders.
+GFBS: glTF 1.1 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
 
 - Without a shader pack, base textures are rendered with Minecraft entity lighting.
 - With an active Oculus or Iris shader pack, the same entity rendering path remains in use and LabPBR companion textures are created lazily when supported.

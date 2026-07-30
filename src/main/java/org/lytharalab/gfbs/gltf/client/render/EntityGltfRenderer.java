@@ -25,7 +25,6 @@ import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfScene;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
-import org.lytharalab.gfbs.gltf.api.model.MorphTarget;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
@@ -100,7 +99,6 @@ public final class EntityGltfRenderer {
                 || isEmissive(item.material) ? LightTexture.FULL_BRIGHT : packedLight;
             emitPrimitive(
                 buffers.getBuffer(item.renderType),
-                item.renderType.mode(),
                 item.primitive,
                 item.material,
                 item.model,
@@ -243,7 +241,7 @@ public final class EntityGltfRenderer {
 
     private static boolean modeCompatible(VertexFormat.Mode renderMode, PrimitiveMode primitiveMode) {
         if (isTriangleMode(primitiveMode)) {
-            return renderMode == VertexFormat.Mode.QUADS || renderMode == VertexFormat.Mode.TRIANGLES;
+            return renderMode == VertexFormat.Mode.TRIANGLES;
         }
         return renderMode == VertexFormat.Mode.LINES;
     }
@@ -261,19 +259,21 @@ public final class EntityGltfRenderer {
         return result;
     }
 
-    private static void emitPrimitive(VertexConsumer consumer, VertexFormat.Mode renderMode,
-                                      GltfPrimitive primitive, GltfMaterial material,
+    private static void emitPrimitive(VertexConsumer consumer, GltfPrimitive primitive,
+                                      GltfMaterial material,
                                       Matrix4f model, Matrix3f normalMatrix,
                                       float[] skin, int jointCount, float[] morphWeights,
                                       int packedLight, int packedOverlay, float alpha) {
-        float[] positions = primitive.positions();
-        float[] normals = primitive.normals();
+        GltfVertexTransforms.PreparedGeometry geometry =
+            GltfVertexTransforms.prepare(primitive, morphWeights);
+        float[] positions = geometry.positions();
+        float[] normals = geometry.normals();
         float[] uv0 = primitive.texCoords0();
         float[] uv1 = primitive.texCoords1();
         float[] colors = primitive.colors();
         int[] joints = primitive.joints();
         float[] weights = primitive.weights();
-        applyMorphs(primitive, morphWeights, positions, normals);
+        float[] skinScratch = new float[6];
         int[] indices = primitive.indices();
         if (indices == null) {
             indices = new int[primitive.vertexCount()];
@@ -282,15 +282,16 @@ public final class EntityGltfRenderer {
         if (!isTriangleMode(primitive.mode())) {
             emitLines(consumer, primitive.mode(), indices, material, model, normalMatrix,
                 positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
-                packedLight, packedOverlay, alpha);
+                skinScratch, packedLight, packedOverlay, alpha);
             return;
         }
         switch (primitive.mode()) {
             case TRIANGLES -> {
                 for (int i = 0; i < indices.length; i += 3) {
-                    emitTriangle(consumer, renderMode, indices[i], indices[i + 1], indices[i + 2],
+                    emitTriangle(consumer, indices[i], indices[i + 1], indices[i + 2],
                         material, model, normalMatrix, positions, normals, uv0, uv1, colors,
-                        joints, weights, skin, jointCount, packedLight, packedOverlay, alpha);
+                        joints, weights, skin, jointCount, skinScratch,
+                        packedLight, packedOverlay, alpha);
                 }
             }
             case TRIANGLE_STRIP -> {
@@ -303,16 +304,17 @@ public final class EntityGltfRenderer {
                         a = b;
                         b = swap;
                     }
-                    emitTriangle(consumer, renderMode, a, b, c, material, model, normalMatrix,
+                    emitTriangle(consumer, a, b, c, material, model, normalMatrix,
                         positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
-                        packedLight, packedOverlay, alpha);
+                        skinScratch, packedLight, packedOverlay, alpha);
                 }
             }
             case TRIANGLE_FAN -> {
                 for (int i = 2; i < indices.length; i++) {
-                    emitTriangle(consumer, renderMode, indices[0], indices[i - 1], indices[i],
+                    emitTriangle(consumer, indices[0], indices[i - 1], indices[i],
                         material, model, normalMatrix, positions, normals, uv0, uv1, colors,
-                        joints, weights, skin, jointCount, packedLight, packedOverlay, alpha);
+                        joints, weights, skin, jointCount, skinScratch,
+                        packedLight, packedOverlay, alpha);
                 }
             }
             default -> throw new IllegalStateException("Unexpected primitive mode");
@@ -323,30 +325,31 @@ public final class EntityGltfRenderer {
                                   GltfMaterial material, Matrix4f model, Matrix3f normalMatrix,
                                   float[] positions, float[] normals, float[] uv0, float[] uv1,
                                   float[] colors, int[] joints, float[] weights, float[] skin,
-                                  int jointCount, int light, int overlay, float alpha) {
+                                  int jointCount, float[] skinScratch,
+                                  int light, int overlay, float alpha) {
         switch (mode) {
             case POINTS -> {
                 for (int index : indices) emitLine(consumer, index, index, material, model,
                     normalMatrix, positions, normals, uv0, uv1, colors, joints, weights,
-                    skin, jointCount, light, overlay, alpha);
+                    skin, jointCount, skinScratch, light, overlay, alpha);
             }
             case LINES -> {
                 for (int i = 0; i + 1 < indices.length; i += 2) emitLine(
                     consumer, indices[i], indices[i + 1], material, model, normalMatrix,
                     positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
-                    light, overlay, alpha
+                    skinScratch, light, overlay, alpha
                 );
             }
             case LINE_STRIP, LINE_LOOP -> {
                 for (int i = 1; i < indices.length; i++) emitLine(
                     consumer, indices[i - 1], indices[i], material, model, normalMatrix,
                     positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
-                    light, overlay, alpha
+                    skinScratch, light, overlay, alpha
                 );
                 if (mode == PrimitiveMode.LINE_LOOP) emitLine(
                     consumer, indices[indices.length - 1], indices[0], material, model, normalMatrix,
                     positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
-                    light, overlay, alpha
+                    skinScratch, light, overlay, alpha
                 );
             }
             default -> throw new IllegalStateException("Unexpected line mode");
@@ -357,36 +360,35 @@ public final class EntityGltfRenderer {
                                  GltfMaterial material, Matrix4f model, Matrix3f normalMatrix,
                                  float[] positions, float[] normals, float[] uv0, float[] uv1,
                                  float[] colors, int[] joints, float[] weights, float[] skin,
-                                 int jointCount, int light, int overlay, float alpha) {
+                                 int jointCount, float[] skinScratch,
+                                 int light, int overlay, float alpha) {
+        float[] lineNormal = {0.0f, 1.0f, 0.0f};
         emitVertex(consumer, first, material, model, normalMatrix, positions, normals,
             uv0, uv1, colors, joints, weights, skin, jointCount, light, overlay,
-            new float[]{0, 1, 0}, alpha);
+            lineNormal, skinScratch, alpha);
         emitVertex(consumer, second, material, model, normalMatrix, positions, normals,
             uv0, uv1, colors, joints, weights, skin, jointCount, light, overlay,
-            new float[]{0, 1, 0}, alpha);
+            lineNormal, skinScratch, alpha);
     }
 
-    private static void emitTriangle(VertexConsumer consumer, VertexFormat.Mode renderMode,
-                                     int a, int b, int c, GltfMaterial material,
+    private static void emitTriangle(VertexConsumer consumer, int a, int b, int c,
+                                     GltfMaterial material,
                                      Matrix4f model, Matrix3f normalMatrix,
                                      float[] positions, float[] normals, float[] uv0, float[] uv1,
                                      float[] colors, int[] joints, float[] weights, float[] skin,
-                                     int jointCount, int packedLight, int packedOverlay, float alpha) {
-        float[] generatedNormal = normals == null ? faceNormal(positions, a, b, c) : null;
+                                     int jointCount, float[] skinScratch,
+                                     int packedLight, int packedOverlay, float alpha) {
+        float[] generatedNormal = normals == null
+            ? GltfVertexTransforms.faceNormal(positions, a, b, c) : null;
         emitVertex(consumer, a, material, model, normalMatrix, positions, normals, uv0, uv1,
             colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
-            generatedNormal, alpha);
+            generatedNormal, skinScratch, alpha);
         emitVertex(consumer, b, material, model, normalMatrix, positions, normals, uv0, uv1,
             colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
-            generatedNormal, alpha);
+            generatedNormal, skinScratch, alpha);
         emitVertex(consumer, c, material, model, normalMatrix, positions, normals, uv0, uv1,
             colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
-            generatedNormal, alpha);
-        if (renderMode == VertexFormat.Mode.QUADS) {
-            emitVertex(consumer, c, material, model, normalMatrix, positions, normals, uv0, uv1,
-                colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
-                generatedNormal, alpha);
-        }
+            generatedNormal, skinScratch, alpha);
     }
 
     private static void emitVertex(VertexConsumer consumer, int vertex, GltfMaterial material,
@@ -394,7 +396,7 @@ public final class EntityGltfRenderer {
                                    float[] positions, float[] normals, float[] uv0, float[] uv1,
                                    float[] colors, int[] joints, float[] weights, float[] skin,
                                    int jointCount, int packedLight, int packedOverlay,
-                                   float[] generatedNormal, float alpha) {
+                                   float[] generatedNormal, float[] skinScratch, float alpha) {
         int position = vertex * 3;
         float x = positions[position];
         float y = positions[position + 1];
@@ -403,15 +405,15 @@ public final class EntityGltfRenderer {
         float ny = normals == null ? generatedNormal[1] : normals[position + 1];
         float nz = normals == null ? generatedNormal[2] : normals[position + 2];
         if (skin != null && joints != null && weights != null) {
-            float[] skinned = skinVertex(
-                vertex, x, y, z, nx, ny, nz, joints, weights, skin, jointCount
+            GltfVertexTransforms.skinVertex(
+                vertex, x, y, z, nx, ny, nz, joints, weights, skin, jointCount, skinScratch
             );
-            x = skinned[0];
-            y = skinned[1];
-            z = skinned[2];
-            nx = skinned[3];
-            ny = skinned[4];
-            nz = skinned[5];
+            x = skinScratch[0];
+            y = skinScratch[1];
+            z = skinScratch[2];
+            nx = skinScratch[3];
+            ny = skinScratch[4];
+            nz = skinScratch[5];
         }
         float[] base = material.baseColor();
         int colorComponents = colors == null ? 0 : colors.length / (positions.length / 3);
@@ -435,104 +437,6 @@ public final class EntityGltfRenderer {
             .uv2(packedLight)
             .normal(normalMatrix, nx, ny, nz)
             .endVertex();
-    }
-
-    private static float[] faceNormal(float[] positions, int a, int b, int c) {
-        int first = a * 3;
-        int second = b * 3;
-        int third = c * 3;
-        float abX = positions[second] - positions[first];
-        float abY = positions[second + 1] - positions[first + 1];
-        float abZ = positions[second + 2] - positions[first + 2];
-        float acX = positions[third] - positions[first];
-        float acY = positions[third + 1] - positions[first + 1];
-        float acZ = positions[third + 2] - positions[first + 2];
-        float x = abY * acZ - abZ * acY;
-        float y = abZ * acX - abX * acZ;
-        float z = abX * acY - abY * acX;
-        double lengthSquared = (double) x * x + (double) y * y + (double) z * z;
-        if (!Double.isFinite(lengthSquared) || lengthSquared <= 1.0e-16) {
-            return new float[]{0.0f, 1.0f, 0.0f};
-        }
-        float inverseLength = (float) (1.0 / Math.sqrt(lengthSquared));
-        return new float[]{x * inverseLength, y * inverseLength, z * inverseLength};
-    }
-
-    private static float[] skinVertex(int vertex, float x, float y, float z,
-                                      float nx, float ny, float nz, int[] joints,
-                                      float[] weights, float[] palette, int jointCount) {
-        float px = 0.0f;
-        float py = 0.0f;
-        float pz = 0.0f;
-        float totalWeight = 0.0f;
-        float tx = 0.0f;
-        float ty = 0.0f;
-        float tz = 0.0f;
-        int offset = vertex * 4;
-        for (int i = 0; i < 4; i++) {
-            float weight = Math.max(0.0f, weights[offset + i]);
-            int joint = Math.max(0, Math.min(jointCount - 1, joints[offset + i]));
-            int matrix = joint * 16;
-            px += (palette[matrix] * x + palette[matrix + 4] * y
-                + palette[matrix + 8] * z + palette[matrix + 12]) * weight;
-            py += (palette[matrix + 1] * x + palette[matrix + 5] * y
-                + palette[matrix + 9] * z + palette[matrix + 13]) * weight;
-            pz += (palette[matrix + 2] * x + palette[matrix + 6] * y
-                + palette[matrix + 10] * z + palette[matrix + 14]) * weight;
-            totalWeight += weight;
-            tx += (palette[matrix] * nx + palette[matrix + 4] * ny
-                + palette[matrix + 8] * nz) * weight;
-            ty += (palette[matrix + 1] * nx + palette[matrix + 5] * ny
-                + palette[matrix + 9] * nz) * weight;
-            tz += (palette[matrix + 2] * nx + palette[matrix + 6] * ny
-                + palette[matrix + 10] * nz) * weight;
-        }
-        if (totalWeight <= 1.0e-8f) return new float[]{x, y, z, nx, ny, nz};
-        float inverseWeight = 1.0f / totalWeight;
-        float length = (float) Math.sqrt(tx * tx + ty * ty + tz * tz);
-        if (length > 1.0e-8f) {
-            tx /= length;
-            ty /= length;
-            tz /= length;
-        }
-        return new float[]{
-            px * inverseWeight, py * inverseWeight, pz * inverseWeight, tx, ty, tz
-        };
-    }
-
-    private static void applyMorphs(GltfPrimitive primitive, float[] weights,
-                                    float[] positions, float[] normals) {
-        for (int targetIndex = 0; targetIndex < primitive.morphTargets().size(); targetIndex++) {
-            float weight = weights != null && targetIndex < weights.length ? weights[targetIndex] : 0.0f;
-            if (weight == 0.0f) continue;
-            MorphTarget target = primitive.morphTargets().get(targetIndex);
-            addWeighted(positions, target.positions(), weight);
-            addWeighted(normals, target.normals(), weight);
-        }
-        normalizeNormals(normals);
-    }
-
-    private static void addWeighted(float[] base, float[] delta, float weight) {
-        if (base == null || delta == null) return;
-        for (int i = 0; i < Math.min(base.length, delta.length); i++) {
-            base[i] += delta[i] * weight;
-        }
-    }
-
-    private static void normalizeNormals(float[] normals) {
-        if (normals == null) return;
-        for (int i = 0; i < normals.length; i += 3) {
-            float length = (float) Math.sqrt(
-                normals[i] * normals[i]
-                    + normals[i + 1] * normals[i + 1]
-                    + normals[i + 2] * normals[i + 2]
-            );
-            if (length > 1.0e-8f) {
-                normals[i] /= length;
-                normals[i + 1] /= length;
-                normals[i + 2] /= length;
-            }
-        }
     }
 
     private static boolean isEmissive(GltfMaterial material) {
