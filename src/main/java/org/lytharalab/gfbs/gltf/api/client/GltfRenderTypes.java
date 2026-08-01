@@ -25,6 +25,7 @@ public final class GltfRenderTypes {
     public static final int ORDER_CUTOUT = 100;
     public static final int ORDER_CUSTOM = 500;
     public static final int ORDER_TRANSLUCENT = 1000;
+    public static final int ORDER_EMISSIVE = 1100;
     public static final VertexFormat REQUIRED_FORMAT = DefaultVertexFormat.NEW_ENTITY;
 
     private static final int BUFFER_SIZE = 2 * 1024 * 1024;
@@ -48,6 +49,19 @@ public final class GltfRenderTypes {
             RenderSystem.enableBlend();
             RenderSystem.blendFuncSeparate(
                 GlStateManager.SourceFactor.SRC_ALPHA,
+                GlStateManager.DestFactor.ONE,
+                GlStateManager.SourceFactor.ONE,
+                GlStateManager.DestFactor.ONE
+            );
+        }, () -> {
+            RenderSystem.disableBlend();
+            RenderSystem.defaultBlendFunc();
+        });
+    private static final RenderStateShard.TransparencyStateShard EMISSIVE_ADDITIVE =
+        new RenderStateShard.TransparencyStateShard("gfbs_gltf_emissive_additive", () -> {
+            RenderSystem.enableBlend();
+            RenderSystem.blendFuncSeparate(
+                GlStateManager.SourceFactor.ONE,
                 GlStateManager.DestFactor.ONE,
                 GlStateManager.SourceFactor.ONE,
                 GlStateManager.DestFactor.ONE
@@ -94,6 +108,23 @@ public final class GltfRenderTypes {
             translucent ? ORDER_TRANSLUCENT : ORDER_SOLID,
             !translucent,
             VertexFormat.Mode.LINES
+        );
+    }
+
+    /**
+     * Full-bright additive material pass used for glTF emissive factors and textures.
+     */
+    public static RenderType emissive(ResourceLocation texture, boolean cull,
+                                      boolean lineGeometry) {
+        return standard(
+            lineGeometry ? "emissive_lines" : "emissive",
+            texture,
+            cull && !lineGeometry,
+            GameRenderer::getRendertypeEntityTranslucentShader,
+            EMISSIVE_ADDITIVE,
+            ORDER_EMISSIVE,
+            false,
+            lineGeometry ? VertexFormat.Mode.LINES : VertexFormat.Mode.TRIANGLES
         );
     }
 

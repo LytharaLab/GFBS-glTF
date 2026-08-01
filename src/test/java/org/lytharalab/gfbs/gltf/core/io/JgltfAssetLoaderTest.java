@@ -85,6 +85,36 @@ class JgltfAssetLoaderTest {
         assertTriangle(asset);
     }
 
+    @Test
+    void loadsUnlitAndEmissiveStrengthMaterialExtensions() throws Exception {
+        byte[] bin = triangleBinary();
+        String source = json(
+            "data:application/octet-stream;base64,"
+                + Base64.getEncoder().encodeToString(bin),
+            bin.length
+        );
+        String extended = source.replace(
+            "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}]}",
+            """
+            "extensionsUsed":["KHR_materials_unlit","KHR_materials_emissive_strength"],
+            "materials":[{
+              "emissiveFactor":[0.25,0.5,1.0],
+              "extensions":{
+                "KHR_materials_unlit":{},
+                "KHR_materials_emissive_strength":{"emissiveStrength":4.0}
+              }
+            }],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}]}
+            """
+        );
+        GltfAsset asset = new JgltfAssetLoader().load(GLTF, ignored ->
+            new ByteArrayInputStream(extended.getBytes(StandardCharsets.UTF_8)));
+        var material = asset.materials().get(0);
+        assertTrue(material.unlit());
+        assertEquals(4.0f, material.emissiveStrength());
+        assertArrayEquals(new float[]{.25f, .5f, 1.0f}, material.emissive(), 1.0e-6f);
+    }
+
 
     @Test
     void synthesizesDefaultSceneWhenSceneArrayIsMissing() throws Exception {

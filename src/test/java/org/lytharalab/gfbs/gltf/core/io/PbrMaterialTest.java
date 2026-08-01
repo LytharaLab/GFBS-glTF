@@ -12,4 +12,32 @@ class PbrMaterialTest {
         GltfMaterial flippedNormal = new GltfMaterial("flipped", null, -1, 0, 0, 1, -1, 0, -1, 0, -1, -1, 0, 1, null, -1, 0, AlphaMode.OPAQUE, .5f, false);
         assertEquals(-1.0f, flippedNormal.normalScale());
     }
+
+    @Test void retainsTextureTransformsAndMaterialExtensions() {
+        GltfTextureInfo base = new GltfTextureInfo(0, 1, .1f, .2f, 2, 3, .4f);
+        GltfTextureInfo emissive = new GltfTextureInfo(4, 0, 0, 0, 1, 1, .5f);
+        GltfMaterial material = new GltfMaterial(
+            "extended",
+            new float[]{1, 1, 1, 1},
+            base,
+            .2f,
+            .8f,
+            new GltfTextureInfo(1, 0),
+            new GltfTextureInfo(2, 1),
+            .75f,
+            new GltfTextureInfo(3, 0),
+            .6f,
+            new float[]{.1f, .2f, .3f},
+            emissive,
+            6.0f,
+            AlphaMode.OPAQUE,
+            .5f,
+            true,
+            true
+        );
+        assertEquals(base, material.baseColorTextureInfo());
+        assertEquals(emissive, material.emissiveTextureInfo());
+        assertEquals(6.0f, material.emissiveStrength());
+        assertTrue(material.unlit());
+    }
 }

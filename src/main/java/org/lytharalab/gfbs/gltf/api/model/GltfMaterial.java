@@ -5,17 +5,19 @@ import java.util.Arrays;
 public final class GltfMaterial {
     private final String name;
     private final float[] baseColor;
-    private final int baseColorTexture;
-    private final int baseColorTexCoord;
+    private final GltfTextureInfo baseColorTexture;
     private final float metallicFactor, roughnessFactor;
-    private final int metallicRoughnessTexture, metallicRoughnessTexCoord, normalTexture, normalTexCoord, occlusionTexture, occlusionTexCoord;
+    private final GltfTextureInfo metallicRoughnessTexture;
+    private final GltfTextureInfo normalTexture;
+    private final GltfTextureInfo occlusionTexture;
     private final float normalScale, occlusionStrength;
     private final float[] emissive;
-    private final int emissiveTexture;
-    private final int emissiveTexCoord;
+    private final GltfTextureInfo emissiveTexture;
+    private final float emissiveStrength;
     private final AlphaMode alphaMode;
     private final float alphaCutoff;
     private final boolean doubleSided;
+    private final boolean unlit;
 
     public GltfMaterial(String name, float[] baseColor, int baseColorTexture,
                         int baseColorTexCoord, float[] emissive, int emissiveTexture,
@@ -24,24 +26,21 @@ public final class GltfMaterial {
         this(
             name,
             baseColor,
-            baseColorTexture,
-            baseColorTexCoord,
+            new GltfTextureInfo(baseColorTexture, baseColorTexCoord),
             1.0f,
             1.0f,
-            -1,
-            0,
-            -1,
-            0,
+            GltfTextureInfo.absent(),
+            GltfTextureInfo.absent(),
             1.0f,
-            -1,
-            0,
+            GltfTextureInfo.absent(),
             1.0f,
             emissive,
-            emissiveTexture,
-            emissiveTexCoord,
+            new GltfTextureInfo(emissiveTexture, emissiveTexCoord),
+            1.0f,
             alphaMode,
             alphaCutoff,
-            doubleSided
+            doubleSided,
+            false
         );
     }
 
@@ -70,38 +69,74 @@ public final class GltfMaterial {
         this.name = name == null ? "" : name;
         this.baseColor = copy(baseColor, 4, new float[]{1, 1, 1, 1}, "base color");
         requireRange(this.baseColor, 0.0f, 1.0f, "base color");
-        if (baseColorTexture < -1) throw new IllegalArgumentException("Invalid base color texture index");
-        this.baseColorTexture = baseColorTexture;
-        requireSupportedTexCoord(baseColorTexCoord);
-        this.baseColorTexCoord = baseColorTexCoord;
+        this.baseColorTexture = new GltfTextureInfo(baseColorTexture, baseColorTexCoord);
         this.metallicFactor = unit(metallicFactor, "metallic factor");
         this.roughnessFactor = unit(roughnessFactor, "roughness factor");
-        this.metallicRoughnessTexture = texture(
-            metallicRoughnessTexture,
-            "metallic-roughness"
-        );
-        requireSupportedTexCoord(metallicRoughnessTexCoord);
-        this.metallicRoughnessTexCoord = metallicRoughnessTexCoord;
-        this.normalTexture = texture(normalTexture, "normal");
-        requireSupportedTexCoord(normalTexCoord);
-        this.normalTexCoord = normalTexCoord;
+        this.metallicRoughnessTexture =
+            new GltfTextureInfo(texture(metallicRoughnessTexture, "metallic-roughness"),
+                metallicRoughnessTexCoord);
+        this.normalTexture = new GltfTextureInfo(texture(normalTexture, "normal"), normalTexCoord);
         this.normalScale = finite(normalScale, "normal scale");
-        this.occlusionTexture = texture(occlusionTexture, "occlusion");
-        requireSupportedTexCoord(occlusionTexCoord);
-        this.occlusionTexCoord = occlusionTexCoord;
+        this.occlusionTexture =
+            new GltfTextureInfo(texture(occlusionTexture, "occlusion"), occlusionTexCoord);
         this.occlusionStrength = unit(occlusionStrength, "occlusion strength");
         this.emissive = copy(emissive, 3, new float[]{0, 0, 0}, "emissive factor");
         requireRange(this.emissive, 0.0f, 1.0f, "emissive factor");
-        if (emissiveTexture < -1) throw new IllegalArgumentException("Invalid emissive texture index");
-        this.emissiveTexture = emissiveTexture;
-        requireSupportedTexCoord(emissiveTexCoord);
-        this.emissiveTexCoord = emissiveTexCoord;
+        this.emissiveTexture = new GltfTextureInfo(emissiveTexture, emissiveTexCoord);
+        this.emissiveStrength = 1.0f;
         this.alphaMode = alphaMode == null ? AlphaMode.OPAQUE : alphaMode;
         if (!Float.isFinite(alphaCutoff) || alphaCutoff < 0.0f || alphaCutoff > 1.0f) {
             throw new IllegalArgumentException("Alpha cutoff must be between 0 and 1");
         }
         this.alphaCutoff = alphaCutoff;
         this.doubleSided = doubleSided;
+        this.unlit = false;
+    }
+
+    public GltfMaterial(
+        String name,
+        float[] baseColor,
+        GltfTextureInfo baseColorTexture,
+        float metallicFactor,
+        float roughnessFactor,
+        GltfTextureInfo metallicRoughnessTexture,
+        GltfTextureInfo normalTexture,
+        float normalScale,
+        GltfTextureInfo occlusionTexture,
+        float occlusionStrength,
+        float[] emissive,
+        GltfTextureInfo emissiveTexture,
+        float emissiveStrength,
+        AlphaMode alphaMode,
+        float alphaCutoff,
+        boolean doubleSided,
+        boolean unlit
+    ) {
+        this.name = name == null ? "" : name;
+        this.baseColor = copy(baseColor, 4, new float[]{1, 1, 1, 1}, "base color");
+        requireRange(this.baseColor, 0.0f, 1.0f, "base color");
+        this.baseColorTexture = requireTextureInfo(baseColorTexture);
+        this.metallicFactor = unit(metallicFactor, "metallic factor");
+        this.roughnessFactor = unit(roughnessFactor, "roughness factor");
+        this.metallicRoughnessTexture = requireTextureInfo(metallicRoughnessTexture);
+        this.normalTexture = requireTextureInfo(normalTexture);
+        this.normalScale = finite(normalScale, "normal scale");
+        this.occlusionTexture = requireTextureInfo(occlusionTexture);
+        this.occlusionStrength = unit(occlusionStrength, "occlusion strength");
+        this.emissive = copy(emissive, 3, new float[]{0, 0, 0}, "emissive factor");
+        requireRange(this.emissive, 0.0f, 1.0f, "emissive factor");
+        this.emissiveTexture = requireTextureInfo(emissiveTexture);
+        if (!Float.isFinite(emissiveStrength) || emissiveStrength < 0.0f) {
+            throw new IllegalArgumentException("Emissive strength must be finite and non-negative");
+        }
+        this.emissiveStrength = emissiveStrength;
+        this.alphaMode = alphaMode == null ? AlphaMode.OPAQUE : alphaMode;
+        if (!Float.isFinite(alphaCutoff) || alphaCutoff < 0.0f || alphaCutoff > 1.0f) {
+            throw new IllegalArgumentException("Alpha cutoff must be between 0 and 1");
+        }
+        this.alphaCutoff = alphaCutoff;
+        this.doubleSided = doubleSided;
+        this.unlit = unlit;
     }
 
     private static int texture(int value, String label) {
@@ -142,10 +177,9 @@ public final class GltfMaterial {
         }
     }
 
-    private static void requireSupportedTexCoord(int texCoord) {
-        if (texCoord < 0 || texCoord > 1) {
-            throw new IllegalArgumentException("GFBS:glTF supports TEXCOORD_0 and TEXCOORD_1");
-        }
+    private static GltfTextureInfo requireTextureInfo(GltfTextureInfo info) {
+        if (info == null) return GltfTextureInfo.absent();
+        return info;
     }
 
     public static GltfMaterial defaultMaterial() {
@@ -155,22 +189,29 @@ public final class GltfMaterial {
 
     public String name() { return name; }
     public float[] baseColor() { return baseColor.clone(); }
-    public int baseColorTexture() { return baseColorTexture; }
-    public int baseColorTexCoord() { return baseColorTexCoord; }
+    public int baseColorTexture() { return baseColorTexture.texture(); }
+    public int baseColorTexCoord() { return baseColorTexture.texCoord(); }
+    public GltfTextureInfo baseColorTextureInfo() { return baseColorTexture; }
     public float metallicFactor() { return metallicFactor; }
     public float roughnessFactor() { return roughnessFactor; }
-    public int metallicRoughnessTexture() { return metallicRoughnessTexture; }
-    public int metallicRoughnessTexCoord() { return metallicRoughnessTexCoord; }
-    public int normalTexture() { return normalTexture; }
-    public int normalTexCoord() { return normalTexCoord; }
+    public int metallicRoughnessTexture() { return metallicRoughnessTexture.texture(); }
+    public int metallicRoughnessTexCoord() { return metallicRoughnessTexture.texCoord(); }
+    public GltfTextureInfo metallicRoughnessTextureInfo() { return metallicRoughnessTexture; }
+    public int normalTexture() { return normalTexture.texture(); }
+    public int normalTexCoord() { return normalTexture.texCoord(); }
+    public GltfTextureInfo normalTextureInfo() { return normalTexture; }
     public float normalScale() { return normalScale; }
-    public int occlusionTexture() { return occlusionTexture; }
-    public int occlusionTexCoord() { return occlusionTexCoord; }
+    public int occlusionTexture() { return occlusionTexture.texture(); }
+    public int occlusionTexCoord() { return occlusionTexture.texCoord(); }
+    public GltfTextureInfo occlusionTextureInfo() { return occlusionTexture; }
     public float occlusionStrength() { return occlusionStrength; }
     public float[] emissive() { return emissive.clone(); }
-    public int emissiveTexture() { return emissiveTexture; }
-    public int emissiveTexCoord() { return emissiveTexCoord; }
+    public int emissiveTexture() { return emissiveTexture.texture(); }
+    public int emissiveTexCoord() { return emissiveTexture.texCoord(); }
+    public GltfTextureInfo emissiveTextureInfo() { return emissiveTexture; }
+    public float emissiveStrength() { return emissiveStrength; }
     public AlphaMode alphaMode() { return alphaMode; }
     public float alphaCutoff() { return alphaCutoff; }
     public boolean doubleSided() { return doubleSided; }
+    public boolean unlit() { return unlit; }
 }

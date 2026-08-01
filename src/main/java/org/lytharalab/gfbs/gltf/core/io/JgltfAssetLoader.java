@@ -33,7 +33,12 @@ public final class JgltfAssetLoader {
     private static final int MAX_ANIMATIONS = 16_384;
     private static final int MAX_ANIMATION_CHANNELS = 250_000;
     private static final long MAX_RUNTIME_ARRAY_BYTES = 256L * 1024L * 1024L;
-    private static final Set<String> SUPPORTED_REQUIRED_EXTENSIONS = Set.of("KHR_mesh_quantization");
+    private static final Set<String> SUPPORTED_REQUIRED_EXTENSIONS = Set.of(
+        "KHR_mesh_quantization",
+        "KHR_texture_transform",
+        "KHR_materials_unlit",
+        "KHR_materials_emissive_strength"
+    );
     private static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final int GLB_MAGIC = 0x46546C67;
     private static final int GLB_VERSION_2 = 2;
@@ -58,6 +63,7 @@ public final class JgltfAssetLoader {
         try (InputStream opened = requireStream(resolver.open(id), id)) {
             byte[] sourceBytes = readAll(opened, budget, id.toString());
             byte[] normalizedBytes = normalizeDataUris(sourceBytes, budget);
+            ObjectNode jsonRoot = readJsonRoot(normalizedBytes);
             GltfAssetReader reader = new GltfAssetReader();
             de.javagl.jgltf.model.io.GltfAsset parsed = reader.readWithoutReferences(
                 new ByteArrayInputStream(normalizedBytes));
@@ -77,7 +83,7 @@ public final class JgltfAssetLoader {
             });
             de.javagl.jgltf.impl.v2.GlTF gltf = (de.javagl.jgltf.impl.v2.GlTF) parsed.getGltf();
             int defaultScene = gltf.getScene() == null ? 0 : gltf.getScene();
-            return convert(id, GltfModels.create(parsed), defaultScene);
+            return convert(id, GltfModels.create(parsed), defaultScene, jsonRoot);
         } catch (ReferenceResolutionException exception) {
             Throwable cause = exception.getCause();
             String message = message(cause);
@@ -90,7 +96,8 @@ public final class JgltfAssetLoader {
         }
     }
 
-    private GltfAsset convert(ResourceLocation id, GltfModel source, int defaultScene) throws GltfLoadException {
+    private GltfAsset convert(ResourceLocation id, GltfModel source, int defaultScene,
+                              ObjectNode jsonRoot) throws GltfLoadException {
         List<NodeModel> sourceNodes = source.getNodeModels();
         List<MeshModel> sourceMeshes = source.getMeshModels();
         List<TextureModel> sourceTextures = source.getTextureModels();
@@ -127,7 +134,11 @@ public final class JgltfAssetLoader {
         IdentityHashMap<MaterialModel, Integer> materialIds = index(source.getMaterialModels());
 
         List<GltfTexture> textures = convertTextures(sourceTextures);
-        List<GltfMaterial> materials = convertMaterials(source.getMaterialModels(), textureIds);
+        List<GltfMaterial> materials = convertMaterials(
+            source.getMaterialModels(),
+            textureIds,
+            jsonRoot.get("materials")
+        );
         int defaultMaterial = materials.size();
         materials.add(GltfMaterial.defaultMaterial());
         List<GltfMesh> meshes = convertMeshes(sourceMeshes, materialIds, defaultMaterial);
@@ -160,22 +171,143 @@ public final class JgltfAssetLoader {
         return result;
     }
 
-    private static List<GltfMaterial> convertMaterials(List<MaterialModel> sources,
-                                                         IdentityHashMap<TextureModel, Integer> textureIds) {
+    private static List<GltfMaterial> convertMaterials(
+        List<MaterialModel> sources,
+        IdentityHashMap<TextureModel, Integer> textureIds,
+        JsonNode materialNodes
+    ) {
         List<GltfMaterial> result = new ArrayList<>(sources.size() + 1);
-        for (MaterialModel source : sources) {
+        for (int materialIndex = 0; materialIndex < sources.size(); materialIndex++) {
+            MaterialModel source = sources.get(materialIndex);
             if (source instanceof MaterialModelV2 material) {
                 org.lytharalab.gfbs.gltf.api.model.AlphaMode alphaMode = material.getAlphaMode() == null
                     ? org.lytharalab.gfbs.gltf.api.model.AlphaMode.OPAQUE
                     : org.lytharalab.gfbs.gltf.api.model.AlphaMode.valueOf(material.getAlphaMode().name());
-                result.add(new GltfMaterial(material.getName(), material.getBaseColorFactor(),
-                    id(textureIds, material.getBaseColorTexture()), value(material.getBaseColorTexcoord(), 0),
-                    material.getMetallicFactor(),material.getRoughnessFactor(),id(textureIds,material.getMetallicRoughnessTexture()),value(material.getMetallicRoughnessTexcoord(),0),id(textureIds,material.getNormalTexture()),value(material.getNormalTexcoord(),0),material.getNormalScale(),id(textureIds,material.getOcclusionTexture()),value(material.getOcclusionTexcoord(),0),material.getOcclusionStrength(),
-                    material.getEmissiveFactor(), id(textureIds, material.getEmissiveTexture()),
-                    value(material.getEmissiveTexcoord(), 0), alphaMode, material.getAlphaCutoff(),
-                    material.isDoubleSided()));
+                JsonNode materialNode = arrayElement(materialNodes, materialIndex);
+                JsonNode pbrNode = child(materialNode, "pbrMetallicRoughness");
+                JsonNode extensions = child(materialNode, "extensions");
+                JsonNode emissiveStrengthNode = child(extensions, "KHR_materials_emissive_strength");
+                result.add(new GltfMaterial(
+                    material.getName(),
+                    material.getBaseColorFactor(),
+                    textureInfo(
+                        child(pbrNode, "baseColorTexture"),
+                        id(textureIds, material.getBaseColorTexture()),
+                        value(material.getBaseColorTexcoord(), 0)
+                    ),
+                    material.getMetallicFactor(),
+                    material.getRoughnessFactor(),
+                    textureInfo(
+                        child(pbrNode, "metallicRoughnessTexture"),
+                        id(textureIds, material.getMetallicRoughnessTexture()),
+                        value(material.getMetallicRoughnessTexcoord(), 0)
+                    ),
+                    textureInfo(
+                        child(materialNode, "normalTexture"),
+                        id(textureIds, material.getNormalTexture()),
+                        value(material.getNormalTexcoord(), 0)
+                    ),
+                    material.getNormalScale(),
+                    textureInfo(
+                        child(materialNode, "occlusionTexture"),
+                        id(textureIds, material.getOcclusionTexture()),
+                        value(material.getOcclusionTexcoord(), 0)
+                    ),
+                    material.getOcclusionStrength(),
+                    material.getEmissiveFactor(),
+                    textureInfo(
+                        child(materialNode, "emissiveTexture"),
+                        id(textureIds, material.getEmissiveTexture()),
+                        value(material.getEmissiveTexcoord(), 0)
+                    ),
+                    number(emissiveStrengthNode, "emissiveStrength", 1.0f),
+                    alphaMode,
+                    material.getAlphaCutoff(),
+                    material.isDoubleSided(),
+                    child(extensions, "KHR_materials_unlit") != null
+                ));
             } else {
                 result.add(GltfMaterial.defaultMaterial());
+            }
+        }
+        return result;
+    }
+
+    private static GltfTextureInfo textureInfo(JsonNode source, int texture, int texCoord) {
+        if (source == null) return new GltfTextureInfo(texture, texCoord);
+        int effectiveTexture = integer(source, "index", texture);
+        int effectiveTexCoord = integer(source, "texCoord", texCoord);
+        float offsetU = 0.0f;
+        float offsetV = 0.0f;
+        float scaleU = 1.0f;
+        float scaleV = 1.0f;
+        float rotation = 0.0f;
+        JsonNode transform = child(child(source, "extensions"), "KHR_texture_transform");
+        if (transform != null) {
+            float[] offset = vector(transform, "offset", 2, new float[]{0.0f, 0.0f});
+            float[] scale = vector(transform, "scale", 2, new float[]{1.0f, 1.0f});
+            offsetU = offset[0];
+            offsetV = offset[1];
+            scaleU = scale[0];
+            scaleV = scale[1];
+            rotation = number(transform, "rotation", 0.0f);
+            effectiveTexCoord = integer(transform, "texCoord", effectiveTexCoord);
+        }
+        return new GltfTextureInfo(
+            effectiveTexture,
+            effectiveTexCoord,
+            offsetU,
+            offsetV,
+            scaleU,
+            scaleV,
+            rotation
+        );
+    }
+
+    private static JsonNode arrayElement(JsonNode array, int index) {
+        if (array == null) return null;
+        if (!array.isArray()) throw new IllegalArgumentException("glTF materials must be an array");
+        return index < array.size() ? array.get(index) : null;
+    }
+
+    private static JsonNode child(JsonNode parent, String field) {
+        if (parent == null) return null;
+        JsonNode child = parent.get(field);
+        return child == null || child.isNull() ? null : child;
+    }
+
+    private static int integer(JsonNode parent, String field, int fallback) {
+        JsonNode value = child(parent, field);
+        if (value == null) return fallback;
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new IllegalArgumentException(field + " must be a 32-bit integer");
+        }
+        return value.intValue();
+    }
+
+    private static float number(JsonNode parent, String field, float fallback) {
+        JsonNode value = child(parent, field);
+        if (value == null) return fallback;
+        if (!value.isNumber()) throw new IllegalArgumentException(field + " must be a number");
+        float result = value.floatValue();
+        if (!Float.isFinite(result)) throw new IllegalArgumentException(field + " must be finite");
+        return result;
+    }
+
+    private static float[] vector(JsonNode parent, String field, int length, float[] fallback) {
+        JsonNode value = child(parent, field);
+        if (value == null) return fallback.clone();
+        if (!value.isArray() || value.size() != length) {
+            throw new IllegalArgumentException(field + " must contain " + length + " numbers");
+        }
+        float[] result = new float[length];
+        for (int index = 0; index < length; index++) {
+            if (!value.get(index).isNumber()) {
+                throw new IllegalArgumentException(field + " must contain numbers");
+            }
+            result[index] = value.get(index).floatValue();
+            if (!Float.isFinite(result[index])) {
+                throw new IllegalArgumentException(field + " contains a non-finite value");
             }
         }
         return result;
@@ -398,6 +530,35 @@ public final class JgltfAssetLoader {
         if (lower.endsWith(".png")) return "image/png";
         if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
         return "application/octet-stream";
+    }
+
+    private static ObjectNode readJsonRoot(byte[] source) throws IOException {
+        byte[] jsonBytes = source;
+        if (source.length >= 12
+            && ByteBuffer.wrap(source).order(ByteOrder.LITTLE_ENDIAN).getInt(0) == GLB_MAGIC) {
+            ByteBuffer input = ByteBuffer.wrap(source).order(ByteOrder.LITTLE_ENDIAN);
+            input.position(12);
+            jsonBytes = null;
+            while (input.hasRemaining()) {
+                if (input.remaining() < 8) throw new IOException("Truncated GLB chunk header");
+                int chunkLength = input.getInt();
+                int chunkType = input.getInt();
+                if (chunkLength < 0 || chunkLength > input.remaining()) {
+                    throw new IOException("Invalid GLB chunk length");
+                }
+                byte[] chunk = new byte[chunkLength];
+                input.get(chunk);
+                if (chunkType == GLB_JSON_CHUNK && jsonBytes == null) {
+                    jsonBytes = trimJsonPadding(chunk);
+                }
+            }
+            if (jsonBytes == null) throw new IOException("GLB has no JSON chunk");
+        }
+        JsonNode parsed = JSON.readTree(jsonBytes);
+        if (!(parsed instanceof ObjectNode root)) {
+            throw new IOException("glTF JSON root must be an object");
+        }
+        return root;
     }
 
 

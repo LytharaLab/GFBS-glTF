@@ -16,7 +16,7 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.1.1` |
+| GFBS: glTF | `1.1.2` |
 | Public API | `1.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
@@ -33,6 +33,12 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Immutable runtime assets with validated node, mesh, material, skin, animation, texture, and scene references.
 - Per-instance scenes, visibility, node-subtree visibility, render settings, animation state, and collision state.
 - Translation, rotation, scale, skinning, morph targets, generated normals, tangents, vertex colors, and two UV sets.
+- Complete glTF 2.0 metallic-roughness material ingestion: base color, metallic-roughness,
+  normal, occlusion, emissive, alpha modes/cutoff, double-sided state, and sampler state.
+- Independent UV selection for every material texture, `KHR_texture_transform`,
+  `KHR_materials_unlit`, and `KHR_materials_emissive_strength`.
+- A dedicated full-bright emissive pass that samples the actual emissive texture instead of
+  making the entire base material full-bright.
 - Animation playback, seeking, pausing, transitions, layers, masks, additive blending, fades, and user-defined events.
 - Server-authoritative animation synchronization for entities, block entities, and custom targets.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
@@ -175,8 +181,14 @@ See the [GFBS: glTF 1.x API guide](docs/1.0-API.md) for loading, animation, rend
 
 GFBS: glTF 1.1 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
 
-- Without a shader pack, base textures are rendered with Minecraft entity lighting.
-- With an active Oculus or Iris shader pack, the same entity rendering path remains in use and LabPBR companion textures are created lazily when supported.
+- Without a shader pack, base textures retain Minecraft entity lighting while emissive factors
+  and textures are rendered in an independent full-bright additive pass.
+- `MASK` materials honor their declared `alphaCutoff`; `BLEND`, `doubleSided`, texture sampler,
+  `TEXCOORD_0`/`TEXCOORD_1`, and texture-transform state are retained.
+- Unlit materials use full-bright base rendering without changing ordinary lit materials.
+- With an active Oculus or Iris shader pack, the same entity rendering path remains in use,
+  LabPBR normal/specular companions are created lazily when supported, and emissive textures
+  remain an explicit color pass.
 - During an Oculus/Iris shadow pass, GFBS switches to a depth-writing caster path and bypasses color-pass culling and custom RenderType overrides.
 - The active shader pack still controls shadow resolution, distance, filtering, and whether block entities participate in its shadow pass.
 

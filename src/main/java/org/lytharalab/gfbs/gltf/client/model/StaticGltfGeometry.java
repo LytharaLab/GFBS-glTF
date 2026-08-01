@@ -1,6 +1,7 @@
 package org.lytharalab.gfbs.gltf.client.model;
 
 import com.mojang.math.Transformation;
+import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.Material;
@@ -24,6 +25,7 @@ import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfScene;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
+import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 import org.lytharalab.gfbs.gltf.client.render.GltfVertexTransforms;
 import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
@@ -156,12 +158,12 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             if (isDegenerate(vertices)) return;
             for (BakedVertex[] quadVertices : quadrangulate(vertices)) {
                 BakedQuad front = bakeQuad(
-                    quadVertices, sprite, false, context.useAmbientOcclusion()
+                    quadVertices, sprite, false, context.useAmbientOcclusion(), material.unlit()
                 );
                 addQuad(modelBuilder, front, quadVertices, material.doubleSided());
                 if (material.doubleSided()) {
                     BakedQuad back = bakeQuad(
-                        quadVertices, sprite, true, context.useAmbientOcclusion()
+                        quadVertices, sprite, true, context.useAmbientOcclusion(), material.unlit()
                     );
                     modelBuilder.addUnculledFace(back);
                 }
@@ -213,9 +215,14 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             float blue = colors == null ? 1.0f : colors[vertex * colorComponents + 2];
             float alpha = colors == null || colorComponents < 4
                 ? 1.0f : colors[vertex * colorComponents + 3];
-            float[] uv = material.baseColorTexCoord() == 1 ? uv1 : uv0;
+            GltfTextureInfo textureInfo = material.baseColorTextureInfo();
+            float[] uv = textureInfo.texCoord() == 1 ? uv1 : uv0;
             float u = uv == null ? 0.0f : uv[vertex * 2];
             float v = uv == null ? 0.0f : uv[vertex * 2 + 1];
+            float[] transformedUv = new float[2];
+            textureInfo.transform(u, v, transformedUv);
+            u = transformedUv[0];
+            v = transformedUv[1];
             if (settings.flipV()) v = 1.0f - v;
             result[i] = new BakedVertex(
                 transformedPosition.x, transformedPosition.y, transformedPosition.z,
@@ -238,7 +245,7 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
     }
 
     private BakedQuad bakeQuad(BakedVertex[] vertices, TextureAtlasSprite sprite,
-                               boolean reverse, boolean ambientOcclusion) {
+                               boolean reverse, boolean ambientOcclusion, boolean unlit) {
         int[] order = reverse ? new int[]{0, 3, 2, 1} : new int[]{0, 1, 2, 3};
         Vector3f faceNormal = geometricNormal(vertices, reverse);
         QuadBakingVertexConsumer.Buffered baker = new QuadBakingVertexConsumer.Buffered();
@@ -253,7 +260,7 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             baker.vertex(vertex.x, vertex.y, vertex.z)
                 .color(vertex.red, vertex.green, vertex.blue, vertex.alpha)
                 .uv(sprite.getU(vertex.u * 16.0), sprite.getV(vertex.v * 16.0))
-                .uv2(0)
+                .uv2(unlit ? LightTexture.FULL_BRIGHT : 0)
                 .normal(vertex.nx * normalSign, vertex.ny * normalSign, vertex.nz * normalSign)
                 .endVertex();
         }
