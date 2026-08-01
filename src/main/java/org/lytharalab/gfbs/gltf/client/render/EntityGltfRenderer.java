@@ -25,6 +25,7 @@ import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfScene;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
+import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
@@ -45,6 +46,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * suppress shadow geometry.</p>
  */
 public final class EntityGltfRenderer {
+    private static final int MAX_EMISSIVE_PASSES = 16;
     private static final Set<RenderType> WARNED_TYPES = ConcurrentHashMap.newKeySet();
 
     private EntityGltfRenderer() {
@@ -90,17 +92,20 @@ public final class EntityGltfRenderer {
         }
         visible.sort(Comparator
             .comparingInt((DrawItem item) -> GltfRenderTypes.sortOrder(item.renderType))
-            .thenComparingDouble(item -> item.material.alphaMode() == AlphaMode.BLEND
+            .thenComparingDouble(item -> item.pass.kind == PassKind.BASE
+                && item.material.alphaMode() == AlphaMode.BLEND
                 ? item.depth : 0.0));
 
         for (DrawItem item : visible) {
             int light = shadowPass
                 || options.lightMode() == GltfRenderOptions.LightMode.FULLBRIGHT
-                || isEmissive(item.material) ? LightTexture.FULL_BRIGHT : packedLight;
+                || item.material.unlit()
+                || item.pass.kind == PassKind.EMISSIVE ? LightTexture.FULL_BRIGHT : packedLight;
             emitPrimitive(
                 buffers.getBuffer(item.renderType),
                 item.primitive,
                 item.material,
+                item.pass,
                 item.model,
                 item.normalMatrix,
                 item.skin,
@@ -117,7 +122,8 @@ public final class EntityGltfRenderer {
             try {
                 Matrix4f projection = context.projection();
                 for (DrawItem item : candidates) {
-                    if (!item.primitive.hasDynamicGeometry()) {
+                    if (item.pass.kind == PassKind.BASE
+                        && !item.primitive.hasDynamicGeometry()) {
                         occlusion.issue(item.queryKey, projection, item.model, item.primitive.bounds());
                     }
                 }
@@ -178,12 +184,40 @@ public final class EntityGltfRenderer {
                         primitive.bounds().centerZ()
                     );
                     items.add(new DrawItem(
-                        primitive, material, renderType, new Matrix4f(model), new Matrix3f(normalMatrix),
+                        primitive, material, MaterialPass.base(material), renderType,
+                        new Matrix4f(model), new Matrix3f(normalMatrix),
                         skin, jointCount, morphWeights, depth,
                         new GltfOcclusionCuller.QueryKey(
                             instance.id(), nodeIndex, meshIndex, primitiveIndex
                         )
                     ));
+                    if (!shadowPass && hasVisibleEmission(material)) {
+                        ResourceLocationHolder emissiveTexture = new ResourceLocationHolder(
+                            gpu.emissiveTexture(primitive.material())
+                        );
+                        RenderType emissiveRenderType = resolveEmissiveRenderType(
+                            primitive, material, emissiveTexture, options
+                        );
+                        int emissivePasses = emissivePassCount(material);
+                        float passStrength = material.emissiveStrength() / emissivePasses;
+                        for (int pass = 0; pass < emissivePasses; pass++) {
+                            items.add(new DrawItem(
+                                primitive,
+                                material,
+                                MaterialPass.emissive(material, passStrength),
+                                emissiveRenderType,
+                                new Matrix4f(model),
+                                new Matrix3f(normalMatrix),
+                                skin,
+                                jointCount,
+                                morphWeights,
+                                depth,
+                                new GltfOcclusionCuller.QueryKey(
+                                    instance.id(), nodeIndex, meshIndex, primitiveIndex
+                                )
+                            ));
+                        }
+                    }
                 }
             }
             int[] children = node.children();
@@ -239,6 +273,24 @@ public final class EntityGltfRenderer {
         };
     }
 
+    private static RenderType resolveEmissiveRenderType(
+        GltfPrimitive primitive,
+        GltfMaterial material,
+        ResourceLocationHolder texture,
+        GltfRenderOptions options
+    ) {
+        boolean cull = switch (options.cullMode()) {
+            case FORCE_CULL -> true;
+            case FORCE_NO_CULL -> false;
+            case AUTO -> !material.doubleSided();
+        };
+        return GltfRenderTypes.emissive(
+            texture.value,
+            cull,
+            !isTriangleMode(primitive.mode())
+        );
+    }
+
     private static boolean modeCompatible(VertexFormat.Mode renderMode, PrimitiveMode primitiveMode) {
         if (isTriangleMode(primitiveMode)) {
             return renderMode == VertexFormat.Mode.TRIANGLES;
@@ -260,7 +312,7 @@ public final class EntityGltfRenderer {
     }
 
     private static void emitPrimitive(VertexConsumer consumer, GltfPrimitive primitive,
-                                      GltfMaterial material,
+                                      GltfMaterial material, MaterialPass pass,
                                       Matrix4f model, Matrix3f normalMatrix,
                                       float[] skin, int jointCount, float[] morphWeights,
                                       int packedLight, int packedOverlay, float alpha) {
@@ -280,7 +332,7 @@ public final class EntityGltfRenderer {
             for (int i = 0; i < indices.length; i++) indices[i] = i;
         }
         if (!isTriangleMode(primitive.mode())) {
-            emitLines(consumer, primitive.mode(), indices, material, model, normalMatrix,
+            emitLines(consumer, primitive.mode(), indices, material, pass, model, normalMatrix,
                 positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
                 skinScratch, packedLight, packedOverlay, alpha);
             return;
@@ -289,7 +341,7 @@ public final class EntityGltfRenderer {
             case TRIANGLES -> {
                 for (int i = 0; i < indices.length; i += 3) {
                     emitTriangle(consumer, indices[i], indices[i + 1], indices[i + 2],
-                        material, model, normalMatrix, positions, normals, uv0, uv1, colors,
+                        material, pass, model, normalMatrix, positions, normals, uv0, uv1, colors,
                         joints, weights, skin, jointCount, skinScratch,
                         packedLight, packedOverlay, alpha);
                 }
@@ -304,7 +356,7 @@ public final class EntityGltfRenderer {
                         a = b;
                         b = swap;
                     }
-                    emitTriangle(consumer, a, b, c, material, model, normalMatrix,
+                    emitTriangle(consumer, a, b, c, material, pass, model, normalMatrix,
                         positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
                         skinScratch, packedLight, packedOverlay, alpha);
                 }
@@ -312,7 +364,7 @@ public final class EntityGltfRenderer {
             case TRIANGLE_FAN -> {
                 for (int i = 2; i < indices.length; i++) {
                     emitTriangle(consumer, indices[0], indices[i - 1], indices[i],
-                        material, model, normalMatrix, positions, normals, uv0, uv1, colors,
+                        material, pass, model, normalMatrix, positions, normals, uv0, uv1, colors,
                         joints, weights, skin, jointCount, skinScratch,
                         packedLight, packedOverlay, alpha);
                 }
@@ -322,32 +374,34 @@ public final class EntityGltfRenderer {
     }
 
     private static void emitLines(VertexConsumer consumer, PrimitiveMode mode, int[] indices,
-                                  GltfMaterial material, Matrix4f model, Matrix3f normalMatrix,
+                                  GltfMaterial material, MaterialPass pass,
+                                  Matrix4f model, Matrix3f normalMatrix,
                                   float[] positions, float[] normals, float[] uv0, float[] uv1,
                                   float[] colors, int[] joints, float[] weights, float[] skin,
                                   int jointCount, float[] skinScratch,
                                   int light, int overlay, float alpha) {
         switch (mode) {
             case POINTS -> {
-                for (int index : indices) emitLine(consumer, index, index, material, model,
+                for (int index : indices) emitLine(consumer, index, index, material, pass, model,
                     normalMatrix, positions, normals, uv0, uv1, colors, joints, weights,
                     skin, jointCount, skinScratch, light, overlay, alpha);
             }
             case LINES -> {
                 for (int i = 0; i + 1 < indices.length; i += 2) emitLine(
-                    consumer, indices[i], indices[i + 1], material, model, normalMatrix,
+                    consumer, indices[i], indices[i + 1], material, pass, model, normalMatrix,
                     positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
                     skinScratch, light, overlay, alpha
                 );
             }
             case LINE_STRIP, LINE_LOOP -> {
                 for (int i = 1; i < indices.length; i++) emitLine(
-                    consumer, indices[i - 1], indices[i], material, model, normalMatrix,
+                    consumer, indices[i - 1], indices[i], material, pass, model, normalMatrix,
                     positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
                     skinScratch, light, overlay, alpha
                 );
                 if (mode == PrimitiveMode.LINE_LOOP) emitLine(
-                    consumer, indices[indices.length - 1], indices[0], material, model, normalMatrix,
+                    consumer, indices[indices.length - 1], indices[0], material, pass,
+                    model, normalMatrix,
                     positions, normals, uv0, uv1, colors, joints, weights, skin, jointCount,
                     skinScratch, light, overlay, alpha
                 );
@@ -357,22 +411,23 @@ public final class EntityGltfRenderer {
     }
 
     private static void emitLine(VertexConsumer consumer, int first, int second,
-                                 GltfMaterial material, Matrix4f model, Matrix3f normalMatrix,
+                                 GltfMaterial material, MaterialPass pass,
+                                 Matrix4f model, Matrix3f normalMatrix,
                                  float[] positions, float[] normals, float[] uv0, float[] uv1,
                                  float[] colors, int[] joints, float[] weights, float[] skin,
                                  int jointCount, float[] skinScratch,
                                  int light, int overlay, float alpha) {
         float[] lineNormal = {0.0f, 1.0f, 0.0f};
-        emitVertex(consumer, first, material, model, normalMatrix, positions, normals,
+        emitVertex(consumer, first, material, pass, model, normalMatrix, positions, normals,
             uv0, uv1, colors, joints, weights, skin, jointCount, light, overlay,
             lineNormal, skinScratch, alpha);
-        emitVertex(consumer, second, material, model, normalMatrix, positions, normals,
+        emitVertex(consumer, second, material, pass, model, normalMatrix, positions, normals,
             uv0, uv1, colors, joints, weights, skin, jointCount, light, overlay,
             lineNormal, skinScratch, alpha);
     }
 
     private static void emitTriangle(VertexConsumer consumer, int a, int b, int c,
-                                     GltfMaterial material,
+                                     GltfMaterial material, MaterialPass pass,
                                      Matrix4f model, Matrix3f normalMatrix,
                                      float[] positions, float[] normals, float[] uv0, float[] uv1,
                                      float[] colors, int[] joints, float[] weights, float[] skin,
@@ -380,18 +435,22 @@ public final class EntityGltfRenderer {
                                      int packedLight, int packedOverlay, float alpha) {
         float[] generatedNormal = normals == null
             ? GltfVertexTransforms.faceNormal(positions, a, b, c) : null;
-        emitVertex(consumer, a, material, model, normalMatrix, positions, normals, uv0, uv1,
+        emitVertex(consumer, a, material, pass, model, normalMatrix,
+            positions, normals, uv0, uv1,
             colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
             generatedNormal, skinScratch, alpha);
-        emitVertex(consumer, b, material, model, normalMatrix, positions, normals, uv0, uv1,
+        emitVertex(consumer, b, material, pass, model, normalMatrix,
+            positions, normals, uv0, uv1,
             colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
             generatedNormal, skinScratch, alpha);
-        emitVertex(consumer, c, material, model, normalMatrix, positions, normals, uv0, uv1,
+        emitVertex(consumer, c, material, pass, model, normalMatrix,
+            positions, normals, uv0, uv1,
             colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
             generatedNormal, skinScratch, alpha);
     }
 
     private static void emitVertex(VertexConsumer consumer, int vertex, GltfMaterial material,
+                                   MaterialPass pass,
                                    Matrix4f model, Matrix3f normalMatrix,
                                    float[] positions, float[] normals, float[] uv0, float[] uv1,
                                    float[] colors, int[] joints, float[] weights, float[] skin,
@@ -415,22 +474,41 @@ public final class EntityGltfRenderer {
             ny = skinScratch[4];
             nz = skinScratch[5];
         }
-        float[] base = material.baseColor();
         int colorComponents = colors == null ? 0 : colors.length / (positions.length / 3);
-        float red = colors == null ? 1.0f : colors[vertex * colorComponents];
-        float green = colors == null ? 1.0f : colors[vertex * colorComponents + 1];
-        float blue = colors == null ? 1.0f : colors[vertex * colorComponents + 2];
-        float vertexAlpha = colors == null || colorComponents < 4
-            ? 1.0f : colors[vertex * colorComponents + 3];
-        float[] uv = material.baseColorTexCoord() == 1 ? uv1 : uv0;
+        float red;
+        float green;
+        float blue;
+        float outputAlpha;
+        if (pass.kind == PassKind.BASE) {
+            float[] base = material.baseColor();
+            red = (colors == null ? 1.0f : colors[vertex * colorComponents]) * base[0];
+            green = (colors == null ? 1.0f : colors[vertex * colorComponents + 1]) * base[1];
+            blue = (colors == null ? 1.0f : colors[vertex * colorComponents + 2]) * base[2];
+            float vertexAlpha = colors == null || colorComponents < 4
+                ? 1.0f : colors[vertex * colorComponents + 3];
+            float factorAlpha = material.alphaMode() == AlphaMode.MASK ? 1.0f : base[3];
+            outputAlpha = vertexAlpha * factorAlpha * alpha;
+        } else {
+            float[] emissive = material.emissive();
+            float strength = pass.colorScale * alpha;
+            red = emissive[0] * strength;
+            green = emissive[1] * strength;
+            blue = emissive[2] * strength;
+            outputAlpha = 1.0f;
+        }
+        GltfTextureInfo textureInfo = pass.textureInfo;
+        float[] uv = textureInfo.texCoord() == 1 ? uv1 : uv0;
         float u = uv == null ? 0.0f : uv[vertex * 2];
         float v = uv == null ? 0.0f : uv[vertex * 2 + 1];
+        textureInfo.transform(u, v, skinScratch);
+        u = skinScratch[0];
+        v = skinScratch[1];
         consumer.vertex(model, x, y, z)
             .color(
-                channel(red * base[0]),
-                channel(green * base[1]),
-                channel(blue * base[2]),
-                channel(vertexAlpha * base[3] * alpha)
+                channel(red),
+                channel(green),
+                channel(blue),
+                channel(outputAlpha)
             )
             .uv(u, v)
             .overlayCoords(packedOverlay)
@@ -439,10 +517,17 @@ public final class EntityGltfRenderer {
             .endVertex();
     }
 
-    private static boolean isEmissive(GltfMaterial material) {
-        if (material.emissiveTexture() >= 0) return true;
+    private static boolean hasVisibleEmission(GltfMaterial material) {
+        if (material.emissiveStrength() <= 0.0f) return false;
         float[] emissive = material.emissive();
         return emissive[0] > 0.0f || emissive[1] > 0.0f || emissive[2] > 0.0f;
+    }
+
+    private static int emissivePassCount(GltfMaterial material) {
+        float[] emissive = material.emissive();
+        float peak = Math.max(emissive[0], Math.max(emissive[1], emissive[2]))
+            * material.emissiveStrength();
+        return Math.max(1, Math.min(MAX_EMISSIVE_PASSES, (int) Math.ceil(peak)));
     }
 
     private static double transformDepth(Matrix4f matrix, float x, float y, float z) {
@@ -458,8 +543,28 @@ public final class EntityGltfRenderer {
     }
 
     private record DrawItem(GltfPrimitive primitive, GltfMaterial material,
-                            RenderType renderType, Matrix4f model, Matrix3f normalMatrix,
+                            MaterialPass pass, RenderType renderType,
+                            Matrix4f model, Matrix3f normalMatrix,
                             float[] skin, int jointCount, float[] morphWeights, double depth,
                             GltfOcclusionCuller.QueryKey queryKey) {
+    }
+
+    private enum PassKind {
+        BASE,
+        EMISSIVE
+    }
+
+    private record MaterialPass(PassKind kind, GltfTextureInfo textureInfo, float colorScale) {
+        private static MaterialPass base(GltfMaterial material) {
+            return new MaterialPass(PassKind.BASE, material.baseColorTextureInfo(), 1.0f);
+        }
+
+        private static MaterialPass emissive(GltfMaterial material, float strength) {
+            return new MaterialPass(
+                PassKind.EMISSIVE,
+                material.emissiveTextureInfo(),
+                strength
+            );
+        }
     }
 }

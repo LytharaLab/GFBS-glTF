@@ -12,6 +12,7 @@ import org.lwjgl.stb.STBImage;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
+import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfTexture;
 
@@ -33,11 +34,13 @@ final class GltfGpuModel {
 
     final GltfAsset asset;
     final List<ResourceLocation> textures = new ArrayList<>();
+    private final List<ResourceLocation> maskTextures = new ArrayList<>();
     private final List<ResourceLocation> materialTextures = new ArrayList<>();
     private final List<GltfMaterialTexture> materialTextureObjects = new ArrayList<>();
     private final String runtimeId = Long.toUnsignedString(NEXT_RUNTIME_ID.incrementAndGet(), 36);
     private ResourceLocation whiteTexture;
     private boolean pbrUploaded;
+    private boolean pbrAvailable;
     private boolean deleted;
 
     GltfGpuModel(GltfAsset asset) {
@@ -46,6 +49,9 @@ final class GltfGpuModel {
         try {
             uploadTextures();
             uploadWhiteTexture();
+            for (int index = 0; index < asset.materials().size(); index++) {
+                maskTextures.add(null);
+            }
         } catch (RuntimeException | Error failure) {
             try {
                 delete();
@@ -59,23 +65,81 @@ final class GltfGpuModel {
     ResourceLocation materialTexture(int materialIndex, boolean shaderPackActive) {
         if (shaderPackActive && OculusCompat.installed()) {
             ensurePbrTextures();
-            return materialTextures.get(materialIndex);
+            if (pbrAvailable) return materialTextures.get(materialIndex);
         }
         GltfMaterial material = asset.materials().get(materialIndex);
+        if (material.alphaMode() == AlphaMode.MASK) {
+            return maskTexture(materialIndex);
+        }
         return material.baseColorTexture() < 0
             ? whiteTexture
             : textures.get(material.baseColorTexture());
     }
 
+    ResourceLocation emissiveTexture(int materialIndex) {
+        GltfMaterial material = asset.materials().get(materialIndex);
+        return material.emissiveTexture() < 0
+            ? whiteTexture
+            : textures.get(material.emissiveTexture());
+    }
+
     private void ensurePbrTextures() {
         if (pbrUploaded) return;
         RenderSystem.assertOnRenderThread();
+        if (!OculusPbrTextureBridge.install()) {
+            pbrUploaded = true;
+            pbrAvailable = false;
+            return;
+        }
         try {
             uploadMaterialTextures();
             pbrUploaded = true;
+            pbrAvailable = true;
         } catch (RuntimeException | Error failure) {
             clearMaterialTextures();
             throw failure;
+        }
+    }
+
+    private ResourceLocation maskTexture(int materialIndex) {
+        ResourceLocation existing = maskTextures.get(materialIndex);
+        if (existing != null) return existing;
+        RenderSystem.assertOnRenderThread();
+        GltfMaterial material = asset.materials().get(materialIndex);
+        NativeImage image = null;
+        DynamicTexture dynamic = null;
+        ResourceLocation location = null;
+        boolean registered = false;
+        boolean committed = false;
+        try {
+            image = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
+            applyAlphaMask(image, material);
+            dynamic = new DynamicTexture(image);
+            image = null;
+            GltfTexture sampler = material.baseColorTexture() < 0
+                ? null : asset.textures().get(material.baseColorTexture());
+            location = runtimeLocation("mask/" + materialIndex);
+            Minecraft.getInstance().getTextureManager().register(location, dynamic);
+            registered = true;
+            configureSampler(dynamic, sampler);
+            maskTextures.set(materialIndex, location);
+            committed = true;
+            return location;
+        } catch (IOException exception) {
+            throw new IllegalArgumentException(
+                "Invalid base-color texture for masked material " + materialIndex
+                    + " in " + asset.id(),
+                exception
+            );
+        } finally {
+            if (image != null) image.close();
+            if (!committed) {
+                if (registered && location != null) {
+                    Minecraft.getInstance().getTextureManager().release(location);
+                } else if (dynamic != null) {
+                    dynamic.close();
+                }
+            }
         }
     }
 
@@ -145,26 +209,24 @@ final class GltfGpuModel {
     }
 
     private void uploadMaterialTextures() {
-        OculusPbrTextureBridge.install();
         for (int materialIndex = 0; materialIndex < asset.materials().size(); materialIndex++) {
             GltfMaterial material = asset.materials().get(materialIndex);
             NativeImage base = null;
             NativeImage normal = null;
             NativeImage occlusion = null;
             NativeImage metallicRoughness = null;
-            NativeImage emissive = null;
             GltfMaterialTexture materialTexture = null;
             boolean committed = false;
             try {
                 base = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
+                if (material.alphaMode() == AlphaMode.MASK) applyAlphaMask(base, material);
                 normal = decodeOptional(material.normalTexture());
                 occlusion = decodeOptional(material.occlusionTexture());
                 metallicRoughness = decodeOptional(material.metallicRoughnessTexture());
-                emissive = decodeOptional(material.emissiveTexture());
                 materialTexture = new GltfMaterialTexture(
                     base,
                     createLabPbrNormal(base, normal, occlusion, material),
-                    createLabPbrSpecular(base, metallicRoughness, emissive, material)
+                    createLabPbrSpecular(base, metallicRoughness, material)
                 );
                 base = null;
                 materialTexture.setFilter(true, true);
@@ -185,7 +247,6 @@ final class GltfGpuModel {
                 if (normal != null) normal.close();
                 if (occlusion != null) occlusion.close();
                 if (metallicRoughness != null) metallicRoughness.close();
-                if (emissive != null) emissive.close();
                 if (!committed && materialTexture != null) {
                     materialTexture.closeCompanions();
                     materialTexture.close();
@@ -212,6 +273,33 @@ final class GltfGpuModel {
         } finally {
             MemoryUtil.memFree(encoded);
         }
+    }
+
+    private static void applyAlphaMask(NativeImage image, GltfMaterial material) {
+        float factorAlpha = material.baseColor()[3];
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int source = image.getPixelRGBA(x, y);
+                float alpha = (source >>> 24 & 255) / 255.0f * factorAlpha;
+                int maskedAlpha = alpha >= material.alphaCutoff() ? 255 : 0;
+                image.setPixelRGBA(x, y, source & 0x00ffffff | maskedAlpha << 24);
+            }
+        }
+    }
+
+    private static void configureSampler(DynamicTexture dynamic, GltfTexture sampler) {
+        if (sampler == null) {
+            dynamic.setFilter(false, false);
+            return;
+        }
+        dynamic.setFilter(sampler.magFilter() == 9729, usesMipmaps(sampler.minFilter()));
+        RenderSystem.activeTexture(GL13C.GL_TEXTURE0);
+        RenderSystem.bindTexture(dynamic.getId());
+        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_MAG_FILTER, sampler.magFilter());
+        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_MIN_FILTER, sampler.minFilter());
+        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_WRAP_S, sampler.wrapS());
+        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_WRAP_T, sampler.wrapT());
+        if (usesMipmaps(sampler.minFilter())) GL30C.glGenerateMipmap(GL11C.GL_TEXTURE_2D);
     }
 
     private ResourceLocation runtimeLocation(String suffix) {
@@ -250,12 +338,12 @@ final class GltfGpuModel {
         return output;
     }
 
-    private static NativeImage createLabPbrSpecular(NativeImage base, NativeImage metallicRoughness,
-                                                     NativeImage emissive, GltfMaterial material) {
+    private static NativeImage createLabPbrSpecular(NativeImage base,
+                                                     NativeImage metallicRoughness,
+                                                     GltfMaterial material) {
         int width = metallicRoughness == null ? base.getWidth() : metallicRoughness.getWidth();
         int height = metallicRoughness == null ? base.getHeight() : metallicRoughness.getHeight();
         NativeImage output = new NativeImage(width, height, true);
-        float[] emissiveFactor = material.emissive();
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 int pbr = metallicRoughness == null ? 0xffffffff
@@ -264,21 +352,12 @@ final class GltfGpuModel {
                     1.0f - material.roughnessFactor() * green(pbr) / 255.0f
                 );
                 float metallic = material.metallicFactor() * blue(pbr) / 255.0f;
-                float emission = Math.max(
-                    emissiveFactor[0], Math.max(emissiveFactor[1], emissiveFactor[2])
-                );
-                if (emissive != null) {
-                    int sampledEmissive = sample(emissive, x, y, width, height);
-                    emission *= Math.max(
-                        red(sampledEmissive),
-                        Math.max(green(sampledEmissive), blue(sampledEmissive))
-                    ) / 255.0f;
-                }
+                int reflectance = Math.round(12.0f + metallic * (255.0f - 12.0f));
                 output.setPixelRGBA(x, y, rgba(
                     smoothness,
-                    metallic >= 0.5f ? 255 : 12,
+                    reflectance,
                     0,
-                    channel(emission)
+                    0
                 ));
             }
         }
@@ -315,6 +394,10 @@ final class GltfGpuModel {
             Minecraft.getInstance().getTextureManager().release(texture);
         }
         textures.clear();
+        for (ResourceLocation texture : maskTextures) {
+            if (texture != null) Minecraft.getInstance().getTextureManager().release(texture);
+        }
+        maskTextures.clear();
         if (whiteTexture != null) {
             Minecraft.getInstance().getTextureManager().release(whiteTexture);
             whiteTexture = null;
@@ -330,6 +413,7 @@ final class GltfGpuModel {
         materialTextures.clear();
         materialTextureObjects.clear();
         pbrUploaded = false;
+        pbrAvailable = false;
     }
 
     private static boolean usesMipmaps(int filter) {
