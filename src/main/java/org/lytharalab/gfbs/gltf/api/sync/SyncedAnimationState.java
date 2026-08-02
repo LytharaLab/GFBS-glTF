@@ -16,22 +16,47 @@ public record SyncedAnimationState(AnimationTargetKey target, String animation,
         if (animation == null || animation.length() > 256 || (!stopped && animation.isBlank())) {
             throw new IllegalArgumentException("Invalid animation name");
         }
-        if (!Float.isFinite(initialSeconds) || !Float.isFinite(speed) || speed == 0
-            || !Float.isFinite(transitionSeconds) || transitionSeconds < 0) {
+        if (!Float.isFinite(initialSeconds) || !Float.isFinite(speed) || speed == 0.0f
+            || !Float.isFinite(transitionSeconds) || transitionSeconds < 0.0f) {
             throw new IllegalArgumentException("Invalid playback values");
         }
-        if (sequence < 0) throw new IllegalArgumentException("Sequence must be non-negative");
-        if (stopped && playing) throw new IllegalArgumentException("A stopped animation cannot be playing");
+        if (sequence < 0L) {
+            throw new IllegalArgumentException("Sequence must be non-negative");
+        }
+        if (stopped && playing) {
+            throw new IllegalArgumentException("A stopped animation cannot be playing");
+        }
     }
 
     public float timeAt(long serverTick) {
-        if (!playing || stopped) return initialSeconds;
-        double elapsedSeconds = ((double) serverTick - (double) serverStartTick) / 20.0d;
+        return timeAt((double) serverTick);
+    }
+
+    /**
+     * Evaluates the authoritative animation timeline at a fractional server tick.
+     * Fractional ticks prevent the client renderer from being quantized back to 20 Hz.
+     */
+    public float timeAt(double serverTick) {
+        if (!Double.isFinite(serverTick)) {
+            throw new IllegalArgumentException("Server tick must be finite");
+        }
+        if (!playing || stopped) {
+            return initialSeconds;
+        }
+        double elapsedSeconds = (serverTick - (double) serverStartTick) / 20.0d;
         double value = (double) initialSeconds + elapsedSeconds * speed;
         if (!Double.isFinite(value) || value > Float.MAX_VALUE || value < -Float.MAX_VALUE) {
             throw new IllegalStateException("Synchronized animation time overflow");
         }
         return (float) value;
+    }
+
+    public float remainingTransitionAt(double serverTick) {
+        if (!Double.isFinite(serverTick)) {
+            throw new IllegalArgumentException("Server tick must be finite");
+        }
+        double elapsedSeconds = Math.max(0.0d, (serverTick - (double) serverStartTick) / 20.0d);
+        return (float) Math.max(0.0d, (double) transitionSeconds - elapsedSeconds);
     }
 
     public CompoundTag save() {
@@ -54,12 +79,23 @@ public record SyncedAnimationState(AnimationTargetKey target, String animation,
     public static SyncedAnimationState load(CompoundTag tag) {
         Objects.requireNonNull(tag, "tag");
         try {
-            AnimationTargetKey target = new AnimationTargetKey(ResourceLocation.parse(tag.getString("dimension")),
-                AnimationTargetKey.Kind.valueOf(tag.getString("kind")), tag.getString("target"));
-            return new SyncedAnimationState(target, tag.getString("animation"), tag.getLong("startTick"),
-                tag.getFloat("initialSeconds"), tag.getFloat("speed"), LoopMode.valueOf(tag.getString("loopMode")),
-                tag.getFloat("transitionSeconds"), tag.getBoolean("playing"), tag.getBoolean("stopped"),
-                tag.getLong("sequence"));
+            AnimationTargetKey target = new AnimationTargetKey(
+                ResourceLocation.parse(tag.getString("dimension")),
+                AnimationTargetKey.Kind.valueOf(tag.getString("kind")),
+                tag.getString("target")
+            );
+            return new SyncedAnimationState(
+                target,
+                tag.getString("animation"),
+                tag.getLong("startTick"),
+                tag.getFloat("initialSeconds"),
+                tag.getFloat("speed"),
+                LoopMode.valueOf(tag.getString("loopMode")),
+                tag.getFloat("transitionSeconds"),
+                tag.getBoolean("playing"),
+                tag.getBoolean("stopped"),
+                tag.getLong("sequence")
+            );
         } catch (RuntimeException exception) {
             throw new IllegalArgumentException("Invalid synchronized animation state NBT", exception);
         }

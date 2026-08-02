@@ -16,8 +16,8 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.1.2` |
-| Public API | `1.1` |
+| GFBS: glTF | `1.2.0` |
+| Public API | `1.2` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -40,7 +40,7 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - A dedicated full-bright emissive pass that samples the actual emissive texture instead of
   making the entire base material full-bright.
 - Animation playback, seeking, pausing, transitions, layers, masks, additive blending, fades, and user-defined events.
-- Server-authoritative animation synchronization for entities, block entities, and custom targets.
+- Latency-tolerant server-authoritative animation synchronization for entities, block entities, and custom targets, with RTT clock probes, actual-TPS estimation, fractional-tick prediction, smooth speed correction, and sequence ordering.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
 - Per-instance, per-node, and per-part RenderType selection with a validated custom RenderType builder.
 - Native triangle submission for glTF triangle, strip, and fan primitives—no degenerate quad padding.
@@ -140,6 +140,28 @@ Close an instance when it is no longer used, especially when collision has been 
 instance.close();
 ```
 
+## Animation synchronization in 1.2.0
+
+GFBS: glTF 1.2.0 keeps animation commands server-authoritative without streaming bones or
+quantizing rendering to the server tick rate. The server sends clip state and time anchors; each
+client reconstructs the same logical timeline and advances its instance at render-frame frequency.
+
+The client periodically measures network RTT, estimates the server's actual logical TPS, scales
+real-time playback to that TPS, and uses a fractional server-tick clock. Normal drift is corrected by
+temporarily changing the live playback speed by a small amount instead of seeking every client tick. A late packet is applied at the
+position the animation should have reached on the server, with a short pose blend to hide the
+unavoidable first visible jump. Only catastrophic desynchronization can trigger a one-time blended
+rebase, protected by a cooldown.
+
+This design remains synchronized under high latency—including roughly 500 ms RTT—while avoiding
+the repetitive 20 Hz snapping present in earlier versions. Network latency can still delay the
+first moment at which a brand-new server command becomes knowable to the client; no genuine
+server-authoritative system can display an unseen command before its packet arrives.
+
+After binding with `SyncedGltfAnimations.bind(...)`, continue calling `instance.update(deltaSeconds)`
+from the render-side owner. Do not independently restart or seek the same base animation from block
+state or renderer code, because the synchronized target owns that base layer.
+
 ## Static Forge block and item models
 
 Use the `gfbs_gltf:gltf` geometry loader for glTF or GLB models that should be baked once at
@@ -179,7 +201,7 @@ See the [GFBS: glTF 1.x API guide](docs/1.0-API.md) for loading, animation, rend
 
 ## Rendering policy
 
-GFBS: glTF 1.1 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
+GFBS: glTF 1.2 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
 
 - Without a shader pack, base textures retain Minecraft entity lighting while emissive factors
   and textures are rendered in an independent full-bright additive pass.

@@ -19,6 +19,22 @@ class AnimationMixerTest {
         c.update(1);assertArrayEquals(new float[]{1,1,0},c.pose().node(0).translation(),1e-5f);assertEquals(1,events.get());
         c.fadeLayer("detail",0,1);c.update(.5f);assertEquals(.25f,c.layer("detail").orElseThrow().weight(),1e-5f);
     }
+
+    @Test void liveSpeedCorrectionDoesNotRestartOrSeekTheClip() {
+        AnimationClip x=clip("x",AnimationPath.TRANSLATION,new float[]{0,0,0,2,0,0});
+        AnimationController c=new AnimationController(asset(x));
+        c.play("x",PlaybackOptions.loop());
+        c.update(.5f);
+        assertEquals(.5f,c.time(),1e-5f);
+        c.setSpeed(1.25f);
+        c.update(.4f);
+        assertEquals(1.0f,c.time(),1e-5f);
+        assertEquals(1.25f,c.speed(),1e-5f);
+        c.setSpeed(0.0f);
+        c.update(.5f);
+        assertEquals(1.0f,c.time(),1e-5f);
+        assertTrue(c.isPlaying());
+    }
     private static AnimationClip clip(String name,AnimationPath path,float[] values){return new AnimationClip(name,List.of(new AnimationChannel(0,path,new AnimationSampler(new float[]{0,2},values,3,Interpolation.LINEAR))));}
     private static GltfAsset asset(AnimationClip... clips){GltfPrimitive p=new GltfPrimitive(PrimitiveMode.TRIANGLES,0,3,new float[]{0,0,0,1,0,0,0,1,0},null,null,null,null,null,null,null,new int[]{0,1,2},List.of());GltfMesh m=new GltfMesh("mesh",List.of(p),null);GltfNode n=new GltfNode("node",-1,new int[0],new int[]{0},-1,null,null,null,null,null);return new GltfAsset(ResourceLocation.fromNamespaceAndPath("test","mixer"),List.of(new GltfScene("scene",new int[]{0})),List.of(n),List.of(m),List.of(GltfMaterial.defaultMaterial()),List.of(),List.of(),List.of(clips),List.of(),List.of());}
 }
