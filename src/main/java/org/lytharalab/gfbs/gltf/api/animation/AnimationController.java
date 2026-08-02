@@ -1,12 +1,563 @@
 package org.lytharalab.gfbs.gltf.api.animation;
-import org.lytharalab.gfbs.gltf.api.model.GltfAsset;import org.lytharalab.gfbs.gltf.core.animation.AnimationEvaluator;import java.util.*;import java.util.concurrent.CopyOnWriteArrayList;
-public final class AnimationController{public static final String BASE_LAYER="base";private final GltfAsset asset;private final ModelPose pose,bind,scratch;private final LinkedHashMap<String,Track> tracks=new LinkedHashMap<>();private final Map<String,List<AnimationEvent>> events=new HashMap<>();private final CopyOnWriteArrayList<AnimationEventListener> listeners=new CopyOnWriteArrayList<>();public AnimationController(GltfAsset a){asset=Objects.requireNonNull(a,"asset");pose=new ModelPose(a);bind=new ModelPose(a);scratch=new ModelPose(a);}public void play(String n,PlaybackOptions o){playLayer(BASE_LAYER,n,o,1,AnimationBlendMode.OVERRIDE,AnimationMask.all(asset.nodes().size()));}
-public void playLayer(String layer,String animation,PlaybackOptions options,float weight,AnimationBlendMode mode,AnimationMask mask){if(layer==null||layer.isBlank())throw new IllegalArgumentException("Animation layer name is blank");AnimationClip clip=asset.animation(Objects.requireNonNull(animation)).orElseThrow(()->new IllegalArgumentException("Unknown animation: "+animation));options=Objects.requireNonNull(options);mode=Objects.requireNonNull(mode);mask=Objects.requireNonNull(mask);check(weight);if(mask.nodeCount()!=asset.nodes().size())throw new IllegalArgumentException("Animation mask node count mismatch");ModelPose source=null;Track old=tracks.get(layer);if(old!=null&&options.transitionSeconds()>0){source=new ModelPose(asset);sample(old,source);}tracks.put(layer,new Track(clip,options,norm(clip,options.initialTime(),options.loopMode()),weight,mode,mask,source));evaluate();}
-public void fadeLayer(String layer,float target,float seconds){check(target);if(!Float.isFinite(seconds)||seconds<0)throw new IllegalArgumentException("Invalid fade duration");Track t=req(layer);t.target=target;t.remaining=seconds;t.rate=seconds==0?0:Math.abs(target-t.weight)/seconds;if(seconds==0)t.weight=target;}public void stopLayer(String layer,float seconds){if(!Float.isFinite(seconds)||seconds<0)throw new IllegalArgumentException("Invalid fade duration");Track t=tracks.get(layer);if(t==null)return;if(seconds==0)tracks.remove(layer);else{t.remove=true;t.target=0;t.remaining=seconds;t.rate=t.weight/seconds;}evaluate();}public void setLayerWeight(String layer,float w){check(w);Track t=req(layer);t.weight=t.target=w;t.remaining=0;evaluate();}public Optional<AnimationLayer> layer(String n){Track t=tracks.get(n);return t==null?Optional.empty():Optional.of(snap(n,t));}public List<AnimationLayer> layers(){List<AnimationLayer> r=new ArrayList<>();tracks.forEach((n,t)->r.add(snap(n,t)));return List.copyOf(r);}
-public void addEvent(String animation,AnimationEvent e){AnimationClip c=asset.animation(animation).orElseThrow(()->new IllegalArgumentException("Unknown animation: "+animation));if(e.time()>c.duration())throw new IllegalArgumentException("Event lies after animation end");events.computeIfAbsent(animation,k->new ArrayList<>()).add(e);events.get(animation).sort(Comparator.comparingDouble(AnimationEvent::time));}public void addEventListener(AnimationEventListener l){listeners.add(Objects.requireNonNull(l));}public void removeEventListener(AnimationEventListener l){listeners.remove(l);}
-public void update(float d){if(!Float.isFinite(d))throw new IllegalArgumentException("Delta time must be finite");if(d==0)return;Iterator<Map.Entry<String,Track>> it=tracks.entrySet().iterator();while(it.hasNext()){var e=it.next();Track t=e.getValue();fade(t,Math.abs(d));if(t.remove&&t.weight<=0){it.remove();continue;}if(t.playing)advance(e.getKey(),t,d);if(t.source!=null){t.transition=Math.min(t.options.transitionSeconds(),t.transition+Math.abs(d));if(t.transition>=t.options.transitionSeconds())t.source=null;}}evaluate();}
-public void seek(float s){seekLayer(BASE_LAYER,s);}public void seekLayer(String l,float s){if(!Float.isFinite(s))throw new IllegalArgumentException("Animation time must be finite");Track t=tracks.get(l);if(t!=null){t.time=norm(t.clip,s,t.options.loopMode());t.source=null;evaluate();}}public void pause(){pauseLayer(BASE_LAYER);}public void pauseLayer(String l){Track t=tracks.get(l);if(t!=null)t.playing=false;}public void resume(){resumeLayer(BASE_LAYER);}public void resumeLayer(String l){Track t=tracks.get(l);if(t!=null)t.playing=true;}public void stop(boolean reset){tracks.remove(BASE_LAYER);if(reset)evaluate();}public void stopAll(boolean reset){tracks.clear();if(reset)pose.reset();}public ModelPose pose(){return pose;}public float time(){Track t=tracks.get(BASE_LAYER);return t==null?0:t.time;}public boolean isPlaying(){Track t=tracks.get(BASE_LAYER);return t!=null&&t.playing;}public Optional<AnimationClip> currentClip(){Track t=tracks.get(BASE_LAYER);return t==null?Optional.empty():Optional.of(t.clip);}
-private void advance(String layer,Track t,float delta){float before=t.time,d=t.clip.duration();double raw=(double)before+(double)delta*t.options.speed();boolean wrap=false;if(t.options.loopMode()==LoopMode.LOOP&&d>0){t.time=(float)mod(raw,d);wrap=t.options.speed()>0?raw>=d||raw<0:raw<=0||raw>d;}else{boolean end=t.options.speed()>0?raw>=d:raw<=0;t.time=(float)Math.max(0,Math.min(d,raw));if(end)t.playing=false;}fire(layer,t,before,t.time,wrap);}private void fire(String layer,Track t,float before,float now,boolean wrap){List<AnimationEvent> es=events.get(t.clip.name());if(es==null)return;boolean f=t.options.speed()>0;for(AnimationEvent e:es){boolean hit=f?(!wrap&&e.time()>before&&e.time()<=now)||(wrap&&(e.time()>before||e.time()<=now)):(!wrap&&e.time()<before&&e.time()>=now)||(wrap&&(e.time()<before||e.time()>=now));if(hit)for(AnimationEventListener l:listeners)l.onAnimationEvent(layer,t.clip,e);}}
-private static void fade(Track t,float d){if(t.remaining<=0||t.weight==t.target)return;float step=Math.min(d,t.remaining)*t.rate;t.weight=t.weight<t.target?Math.min(t.target,t.weight+step):Math.max(t.target,t.weight-step);t.remaining=Math.max(0,t.remaining-d);if(t.remaining==0)t.weight=t.target;}private void evaluate(){pose.reset();for(Track t:tracks.values()){if(t.weight<=0)continue;sample(t,scratch);for(int i=0;i<pose.nodeCount();i++)if(t.mask.includes(i)){if(t.mode==AnimationBlendMode.OVERRIDE)override(pose.node(i),scratch.node(i),t.weight);else add(pose.node(i),scratch.node(i),bind.node(i),t.weight);}}}private void sample(Track t,ModelPose out){out.reset();AnimationEvaluator.apply(t.clip,t.time,out);if(t.source!=null&&t.options.transitionSeconds()>0){float a=Math.min(1,t.transition/t.options.transitionSeconds());for(int i=0;i<out.nodeCount();i++)if(t.mask.includes(i))blend(t.source.node(i),out.node(i),a);}}
-private static void override(NodePose o,NodePose v,float w){w=Math.max(0,Math.min(1,w));for(int c=0;c<3;c++){o.translation()[c]+=(v.translation()[c]-o.translation()[c])*w;o.scale()[c]+=(v.scale()[c]-o.scale()[c])*w;}AnimationEvaluator.blendQuaternion(o.rotation(),v.rotation(),w,o.rotation());float[] a=o.weights(),b=v.weights();if(a!=null&&b!=null&&a.length==b.length)for(int c=0;c<a.length;c++)a[c]+=(b[c]-a[c])*w;}private static void blend(NodePose a,NodePose b,float w){w=Math.max(0,Math.min(1,w));for(int c=0;c<3;c++){b.translation()[c]=a.translation()[c]+(b.translation()[c]-a.translation()[c])*w;b.scale()[c]=a.scale()[c]+(b.scale()[c]-a.scale()[c])*w;}AnimationEvaluator.blendQuaternion(a.rotation(),b.rotation(),w,b.rotation());float[] x=a.weights(),y=b.weights();if(x!=null&&y!=null&&x.length==y.length)for(int c=0;c<y.length;c++)y[c]=x[c]+(y[c]-x[c])*w;}private static void add(NodePose o,NodePose v,NodePose b,float w){for(int c=0;c<3;c++){o.translation()[c]+=(v.translation()[c]-b.translation()[c])*w;float s=Math.abs(b.scale()[c])<1e-7f?1:b.scale()[c];o.scale()[c]*=1+(v.scale()[c]/s-1)*w;}float[] q=delta(v.rotation(),b.rotation()),z=new float[4];AnimationEvaluator.blendQuaternion(new float[]{0,0,0,1},q,w,z);mul(o.rotation(),z,o.rotation());float[] x=v.weights(),y=b.weights(),r=o.weights();if(x!=null&&y!=null&&r!=null)for(int c=0;c<Math.min(x.length,r.length);c++)r[c]+=(x[c]-y[c])*w;}private static float[] delta(float[]v,float[]b){float[]r=new float[4];mul(v,new float[]{-b[0],-b[1],-b[2],b[3]},r);return r;}private static void mul(float[]a,float[]b,float[]o){float x=a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],y=a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],z=a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],w=a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2];o[0]=x;o[1]=y;o[2]=z;o[3]=w;AnimationEvaluator.normalizeQuaternion(o);}
-private Track req(String n){Track t=tracks.get(n);if(t==null)throw new IllegalArgumentException("Unknown animation layer: "+n);return t;}private static void check(float w){if(!Float.isFinite(w)||w<0||w>1)throw new IllegalArgumentException("Layer weight must be between 0 and 1");}private static AnimationLayer snap(String n,Track t){return new AnimationLayer(n,t.clip.name(),t.time,t.weight,t.playing,t.mode);}private static float norm(AnimationClip c,float t,LoopMode l){return l==LoopMode.LOOP&&c.duration()>0?(float)mod(t,c.duration()):Math.max(0,Math.min(c.duration(),t));}private static double mod(double v,double m){double r=v%m;return r<0?r+m:r;}private static final class Track{final AnimationClip clip;final PlaybackOptions options;final AnimationBlendMode mode;final AnimationMask mask;float time,weight,target,remaining,rate,transition;boolean playing=true,remove;ModelPose source;Track(AnimationClip c,PlaybackOptions o,float t,float w,AnimationBlendMode m,AnimationMask mask,ModelPose s){clip=c;options=o;time=t;weight=target=w;mode=m;this.mask=mask;source=s;}}}
+
+import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
+import org.lytharalab.gfbs.gltf.core.animation.AnimationEvaluator;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public final class AnimationController {
+    public static final String BASE_LAYER = "base";
+
+    private final GltfAsset asset;
+    private final ModelPose pose;
+    private final ModelPose bind;
+    private final ModelPose scratch;
+    private final LinkedHashMap<String, Track> tracks = new LinkedHashMap<>();
+    private final Map<String, List<AnimationEvent>> events = new HashMap<>();
+    private final CopyOnWriteArrayList<AnimationEventListener> listeners = new CopyOnWriteArrayList<>();
+
+    public AnimationController(GltfAsset asset) {
+        this.asset = Objects.requireNonNull(asset, "asset");
+        this.pose = new ModelPose(asset);
+        this.bind = new ModelPose(asset);
+        this.scratch = new ModelPose(asset);
+    }
+
+    public void play(String animation, PlaybackOptions options) {
+        playLayer(
+            BASE_LAYER,
+            animation,
+            options,
+            1.0f,
+            AnimationBlendMode.OVERRIDE,
+            AnimationMask.all(asset.nodes().size())
+        );
+    }
+
+    public void playLayer(String layer, String animation, PlaybackOptions options, float weight,
+                          AnimationBlendMode mode, AnimationMask mask) {
+        if (layer == null || layer.isBlank()) {
+            throw new IllegalArgumentException("Animation layer name is blank");
+        }
+        AnimationClip clip = asset.animation(Objects.requireNonNull(animation, "animation"))
+            .orElseThrow(() -> new IllegalArgumentException("Unknown animation: " + animation));
+        options = Objects.requireNonNull(options, "options");
+        mode = Objects.requireNonNull(mode, "mode");
+        mask = Objects.requireNonNull(mask, "mask");
+        checkWeight(weight);
+        if (mask.nodeCount() != asset.nodes().size()) {
+            throw new IllegalArgumentException("Animation mask node count mismatch");
+        }
+
+        ModelPose source = null;
+        Track old = tracks.get(layer);
+        if (options.transitionSeconds() > 0.0f) {
+            if (old != null) {
+                source = new ModelPose(asset);
+                sample(old, source);
+            } else {
+                // A late network state may begin after the authoritative clip has already
+                // advanced. Blend the new base layer from its bind pose instead of popping
+                // directly to the delayed clip position. Other mixer layers remain independent.
+                source = bind.copy();
+            }
+        }
+
+        tracks.put(layer, new Track(
+            clip,
+            options,
+            normalizeTime(clip, options.initialTime(), options.loopMode()),
+            weight,
+            mode,
+            mask,
+            source
+        ));
+        evaluate();
+    }
+
+    public void fadeLayer(String layer, float target, float seconds) {
+        checkWeight(target);
+        if (!Float.isFinite(seconds) || seconds < 0.0f) {
+            throw new IllegalArgumentException("Invalid fade duration");
+        }
+        Track track = requireTrack(layer);
+        track.target = target;
+        track.remaining = seconds;
+        track.rate = seconds == 0.0f ? 0.0f : Math.abs(target - track.weight) / seconds;
+        if (seconds == 0.0f) {
+            track.weight = target;
+        }
+    }
+
+    public void stopLayer(String layer, float seconds) {
+        if (!Float.isFinite(seconds) || seconds < 0.0f) {
+            throw new IllegalArgumentException("Invalid fade duration");
+        }
+        Track track = tracks.get(layer);
+        if (track == null) {
+            return;
+        }
+        if (seconds == 0.0f) {
+            tracks.remove(layer);
+        } else {
+            track.remove = true;
+            track.target = 0.0f;
+            track.remaining = seconds;
+            track.rate = track.weight / seconds;
+        }
+        evaluate();
+    }
+
+    public void setLayerWeight(String layer, float weight) {
+        checkWeight(weight);
+        Track track = requireTrack(layer);
+        track.weight = weight;
+        track.target = weight;
+        track.remaining = 0.0f;
+        evaluate();
+    }
+
+    /**
+     * Changes the live playback speed without restarting or seeking the clip.
+     *
+     * <p>This is intentionally separate from {@link PlaybackOptions}: integrations such as the
+     * synchronized-animation clock can gently correct drift while preserving the current pose,
+     * transition, event cursor, and layer state. A live speed of zero freezes time without
+     * destroying the track.</p>
+     */
+    public void setSpeed(float speed) {
+        setLayerSpeed(BASE_LAYER, speed);
+    }
+
+    /** Changes the live playback speed of an existing layer without restarting it. */
+    public void setLayerSpeed(String layer, float speed) {
+        checkSpeed(speed);
+        Track track = tracks.get(layer);
+        if (track != null) {
+            track.speed = speed;
+        }
+    }
+
+    /** Returns the live speed of the base layer, or zero when no base clip exists. */
+    public float speed() {
+        Track track = tracks.get(BASE_LAYER);
+        return track == null ? 0.0f : track.speed;
+    }
+
+    /** Returns the live speed of a named layer. */
+    public float layerSpeed(String layer) {
+        return requireTrack(layer).speed;
+    }
+
+    public Optional<AnimationLayer> layer(String name) {
+        Track track = tracks.get(name);
+        return track == null ? Optional.empty() : Optional.of(snapshot(name, track));
+    }
+
+    public List<AnimationLayer> layers() {
+        List<AnimationLayer> result = new ArrayList<>();
+        tracks.forEach((name, track) -> result.add(snapshot(name, track)));
+        return List.copyOf(result);
+    }
+
+    public void addEvent(String animation, AnimationEvent event) {
+        AnimationClip clip = asset.animation(animation)
+            .orElseThrow(() -> new IllegalArgumentException("Unknown animation: " + animation));
+        if (event.time() > clip.duration()) {
+            throw new IllegalArgumentException("Event lies after animation end");
+        }
+        events.computeIfAbsent(animation, ignored -> new ArrayList<>()).add(event);
+        events.get(animation).sort(Comparator.comparingDouble(AnimationEvent::time));
+    }
+
+    public void addEventListener(AnimationEventListener listener) {
+        listeners.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    public void removeEventListener(AnimationEventListener listener) {
+        listeners.remove(listener);
+    }
+
+    public void update(float deltaSeconds) {
+        if (!Float.isFinite(deltaSeconds)) {
+            throw new IllegalArgumentException("Delta time must be finite");
+        }
+        if (deltaSeconds == 0.0f) {
+            return;
+        }
+
+        Iterator<Map.Entry<String, Track>> iterator = tracks.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, Track> entry = iterator.next();
+            Track track = entry.getValue();
+            fade(track, Math.abs(deltaSeconds));
+            if (track.remove && track.weight <= 0.0f) {
+                iterator.remove();
+                continue;
+            }
+            if (track.playing) {
+                advance(entry.getKey(), track, deltaSeconds);
+            }
+            if (track.source != null) {
+                track.transition = Math.min(
+                    track.options.transitionSeconds(),
+                    track.transition + Math.abs(deltaSeconds)
+                );
+                if (track.transition >= track.options.transitionSeconds()) {
+                    track.source = null;
+                }
+            }
+        }
+        evaluate();
+    }
+
+    public void seek(float seconds) {
+        seekLayer(BASE_LAYER, seconds);
+    }
+
+    public void seekLayer(String layer, float seconds) {
+        if (!Float.isFinite(seconds)) {
+            throw new IllegalArgumentException("Animation time must be finite");
+        }
+        Track track = tracks.get(layer);
+        if (track != null) {
+            track.time = normalizeTime(track.clip, seconds, track.options.loopMode());
+            track.source = null;
+            evaluate();
+        }
+    }
+
+    public void pause() {
+        pauseLayer(BASE_LAYER);
+    }
+
+    public void pauseLayer(String layer) {
+        Track track = tracks.get(layer);
+        if (track != null) {
+            track.playing = false;
+        }
+    }
+
+    public void resume() {
+        resumeLayer(BASE_LAYER);
+    }
+
+    public void resumeLayer(String layer) {
+        Track track = tracks.get(layer);
+        if (track != null) {
+            track.playing = true;
+        }
+    }
+
+    public void stop(boolean reset) {
+        tracks.remove(BASE_LAYER);
+        if (reset) {
+            evaluate();
+        }
+    }
+
+    public void stopAll(boolean reset) {
+        tracks.clear();
+        if (reset) {
+            pose.reset();
+        }
+    }
+
+    public ModelPose pose() {
+        return pose;
+    }
+
+    public float time() {
+        Track track = tracks.get(BASE_LAYER);
+        return track == null ? 0.0f : track.time;
+    }
+
+    public boolean isPlaying() {
+        Track track = tracks.get(BASE_LAYER);
+        return track != null && track.playing;
+    }
+
+    public Optional<AnimationClip> currentClip() {
+        Track track = tracks.get(BASE_LAYER);
+        return track == null ? Optional.empty() : Optional.of(track.clip);
+    }
+
+    private void advance(String layer, Track track, float deltaSeconds) {
+        if (track.speed == 0.0f) {
+            return;
+        }
+        float before = track.time;
+        float duration = track.clip.duration();
+        double raw = (double) before + (double) deltaSeconds * track.speed;
+        boolean wrapped = false;
+
+        if (track.options.loopMode() == LoopMode.LOOP && duration > 0.0f) {
+            track.time = (float) positiveModulo(raw, duration);
+            wrapped = track.speed > 0.0f
+                ? raw >= duration || raw < 0.0d
+                : raw <= 0.0d || raw > duration;
+        } else {
+            boolean reachedEnd = track.speed > 0.0f ? raw >= duration : raw <= 0.0d;
+            track.time = (float) Math.max(0.0d, Math.min(duration, raw));
+            if (reachedEnd) {
+                track.playing = false;
+            }
+        }
+        fireEvents(layer, track, before, track.time, wrapped);
+    }
+
+    private void fireEvents(String layer, Track track, float before, float now, boolean wrapped) {
+        List<AnimationEvent> clipEvents = events.get(track.clip.name());
+        if (clipEvents == null) {
+            return;
+        }
+        boolean forward = track.speed > 0.0f;
+        for (AnimationEvent event : clipEvents) {
+            boolean hit = forward
+                ? (!wrapped && event.time() > before && event.time() <= now)
+                    || (wrapped && (event.time() > before || event.time() <= now))
+                : (!wrapped && event.time() < before && event.time() >= now)
+                    || (wrapped && (event.time() < before || event.time() >= now));
+            if (hit) {
+                for (AnimationEventListener listener : listeners) {
+                    listener.onAnimationEvent(layer, track.clip, event);
+                }
+            }
+        }
+    }
+
+    private static void fade(Track track, float deltaSeconds) {
+        if (track.remaining <= 0.0f || track.weight == track.target) {
+            return;
+        }
+        float step = Math.min(deltaSeconds, track.remaining) * track.rate;
+        track.weight = track.weight < track.target
+            ? Math.min(track.target, track.weight + step)
+            : Math.max(track.target, track.weight - step);
+        track.remaining = Math.max(0.0f, track.remaining - deltaSeconds);
+        if (track.remaining == 0.0f) {
+            track.weight = track.target;
+        }
+    }
+
+    private void evaluate() {
+        pose.reset();
+        for (Track track : tracks.values()) {
+            if (track.weight <= 0.0f) {
+                continue;
+            }
+            sample(track, scratch);
+            for (int node = 0; node < pose.nodeCount(); node++) {
+                if (!track.mask.includes(node)) {
+                    continue;
+                }
+                if (track.mode == AnimationBlendMode.OVERRIDE) {
+                    override(pose.node(node), scratch.node(node), track.weight);
+                } else {
+                    add(pose.node(node), scratch.node(node), bind.node(node), track.weight);
+                }
+            }
+        }
+    }
+
+    private void sample(Track track, ModelPose output) {
+        output.reset();
+        AnimationEvaluator.apply(track.clip, track.time, output);
+        if (track.source != null && track.options.transitionSeconds() > 0.0f) {
+            float alpha = Math.min(1.0f, track.transition / track.options.transitionSeconds());
+            for (int node = 0; node < output.nodeCount(); node++) {
+                if (track.mask.includes(node)) {
+                    blend(track.source.node(node), output.node(node), alpha);
+                }
+            }
+        }
+    }
+
+    private static void override(NodePose output, NodePose value, float weight) {
+        weight = Math.max(0.0f, Math.min(1.0f, weight));
+        for (int component = 0; component < 3; component++) {
+            output.translation()[component] +=
+                (value.translation()[component] - output.translation()[component]) * weight;
+            output.scale()[component] +=
+                (value.scale()[component] - output.scale()[component]) * weight;
+        }
+        AnimationEvaluator.blendQuaternion(
+            output.rotation(),
+            value.rotation(),
+            weight,
+            output.rotation()
+        );
+        float[] outputWeights = output.weights();
+        float[] valueWeights = value.weights();
+        if (outputWeights != null && valueWeights != null && outputWeights.length == valueWeights.length) {
+            for (int component = 0; component < outputWeights.length; component++) {
+                outputWeights[component] +=
+                    (valueWeights[component] - outputWeights[component]) * weight;
+            }
+        }
+    }
+
+    private static void blend(NodePose source, NodePose target, float weight) {
+        weight = Math.max(0.0f, Math.min(1.0f, weight));
+        for (int component = 0; component < 3; component++) {
+            target.translation()[component] = source.translation()[component]
+                + (target.translation()[component] - source.translation()[component]) * weight;
+            target.scale()[component] = source.scale()[component]
+                + (target.scale()[component] - source.scale()[component]) * weight;
+        }
+        AnimationEvaluator.blendQuaternion(
+            source.rotation(),
+            target.rotation(),
+            weight,
+            target.rotation()
+        );
+        float[] sourceWeights = source.weights();
+        float[] targetWeights = target.weights();
+        if (sourceWeights != null && targetWeights != null && sourceWeights.length == targetWeights.length) {
+            for (int component = 0; component < targetWeights.length; component++) {
+                targetWeights[component] = sourceWeights[component]
+                    + (targetWeights[component] - sourceWeights[component]) * weight;
+            }
+        }
+    }
+
+    private static void add(NodePose output, NodePose value, NodePose bindPose, float weight) {
+        for (int component = 0; component < 3; component++) {
+            output.translation()[component] +=
+                (value.translation()[component] - bindPose.translation()[component]) * weight;
+            float bindScale = Math.abs(bindPose.scale()[component]) < 1.0e-7f
+                ? 1.0f
+                : bindPose.scale()[component];
+            output.scale()[component] *=
+                1.0f + (value.scale()[component] / bindScale - 1.0f) * weight;
+        }
+
+        float[] rotationDelta = quaternionDelta(value.rotation(), bindPose.rotation());
+        float[] weightedDelta = new float[4];
+        AnimationEvaluator.blendQuaternion(
+            new float[]{0.0f, 0.0f, 0.0f, 1.0f},
+            rotationDelta,
+            weight,
+            weightedDelta
+        );
+        multiplyQuaternions(output.rotation(), weightedDelta, output.rotation());
+
+        float[] valueWeights = value.weights();
+        float[] bindWeights = bindPose.weights();
+        float[] outputWeights = output.weights();
+        if (valueWeights != null && bindWeights != null && outputWeights != null) {
+            int length = Math.min(valueWeights.length, outputWeights.length);
+            for (int component = 0; component < length; component++) {
+                outputWeights[component] +=
+                    (valueWeights[component] - bindWeights[component]) * weight;
+            }
+        }
+    }
+
+    private static float[] quaternionDelta(float[] value, float[] bindPose) {
+        float[] result = new float[4];
+        multiplyQuaternions(
+            value,
+            new float[]{-bindPose[0], -bindPose[1], -bindPose[2], bindPose[3]},
+            result
+        );
+        return result;
+    }
+
+    private static void multiplyQuaternions(float[] left, float[] right, float[] output) {
+        float x = left[3] * right[0] + left[0] * right[3]
+            + left[1] * right[2] - left[2] * right[1];
+        float y = left[3] * right[1] - left[0] * right[2]
+            + left[1] * right[3] + left[2] * right[0];
+        float z = left[3] * right[2] + left[0] * right[1]
+            - left[1] * right[0] + left[2] * right[3];
+        float w = left[3] * right[3] - left[0] * right[0]
+            - left[1] * right[1] - left[2] * right[2];
+        output[0] = x;
+        output[1] = y;
+        output[2] = z;
+        output[3] = w;
+        AnimationEvaluator.normalizeQuaternion(output);
+    }
+
+    private Track requireTrack(String name) {
+        Track track = tracks.get(name);
+        if (track == null) {
+            throw new IllegalArgumentException("Unknown animation layer: " + name);
+        }
+        return track;
+    }
+
+    private static void checkWeight(float weight) {
+        if (!Float.isFinite(weight) || weight < 0.0f || weight > 1.0f) {
+            throw new IllegalArgumentException("Layer weight must be between 0 and 1");
+        }
+    }
+
+    private static void checkSpeed(float speed) {
+        if (!Float.isFinite(speed)) {
+            throw new IllegalArgumentException("Speed must be finite");
+        }
+    }
+
+    private static AnimationLayer snapshot(String name, Track track) {
+        return new AnimationLayer(
+            name,
+            track.clip.name(),
+            track.time,
+            track.weight,
+            track.playing,
+            track.mode
+        );
+    }
+
+    private static float normalizeTime(AnimationClip clip, float time, LoopMode loopMode) {
+        return loopMode == LoopMode.LOOP && clip.duration() > 0.0f
+            ? (float) positiveModulo(time, clip.duration())
+            : Math.max(0.0f, Math.min(clip.duration(), time));
+    }
+
+    private static double positiveModulo(double value, double modulus) {
+        double result = value % modulus;
+        return result < 0.0d ? result + modulus : result;
+    }
+
+    private static final class Track {
+        private final AnimationClip clip;
+        private final PlaybackOptions options;
+        private final AnimationBlendMode mode;
+        private final AnimationMask mask;
+        private float time;
+        private float speed;
+        private float weight;
+        private float target;
+        private float remaining;
+        private float rate;
+        private float transition;
+        private boolean playing = true;
+        private boolean remove;
+        private ModelPose source;
+
+        private Track(AnimationClip clip, PlaybackOptions options, float time, float weight,
+                      AnimationBlendMode mode, AnimationMask mask, ModelPose source) {
+            this.clip = clip;
+            this.options = options;
+            this.time = time;
+            this.speed = options.speed();
+            this.weight = weight;
+            this.target = weight;
+            this.mode = mode;
+            this.mask = mask;
+            this.source = source;
+        }
+    }
+}

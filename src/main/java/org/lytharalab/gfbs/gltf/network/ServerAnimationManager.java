@@ -8,13 +8,20 @@ import org.lytharalab.gfbs.gltf.api.sync.AnimationTargetKey;
 import org.lytharalab.gfbs.gltf.api.sync.SyncedAnimationState;
 
 import java.lang.ref.WeakReference;
-import java.util.*;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Stores only authoritative clip state; bones are never streamed over the network. */
+/** Stores authoritative clip state; bone matrices and render frames are never streamed. */
 public final class ServerAnimationManager {
     private static final Map<MinecraftServer, ServerAnimationManager> INSTANCES =
         Collections.synchronizedMap(new WeakHashMap<>());
+
     private final WeakReference<MinecraftServer> server;
     private final Map<AnimationTargetKey, SyncedAnimationState> states = new HashMap<>();
     private final AtomicLong sequence = new AtomicLong();
@@ -40,8 +47,18 @@ public final class ServerAnimationManager {
                                      float speed, LoopMode mode, float transition) {
         requireServerThread();
         requireDimension(level, target);
-        SyncedAnimationState state = new SyncedAnimationState(target, animation, level.getGameTime(), 0,
-            speed, mode, transition, true, false, nextSequence());
+        SyncedAnimationState state = new SyncedAnimationState(
+            target,
+            animation,
+            level.getGameTime(),
+            0.0f,
+            speed,
+            mode,
+            transition,
+            true,
+            false,
+            nextSequence()
+        );
         states.put(target, state);
         broadcast(level, state);
         return state;
@@ -51,19 +68,43 @@ public final class ServerAnimationManager {
         requireServerThread();
         requireDimension(level, target);
         SyncedAnimationState old = states.get(target);
-        if (old == null || old.stopped() || !old.playing()) return;
+        if (old == null || old.stopped() || !old.playing()) {
+            return;
+        }
         float time = old.timeAt(level.getGameTime());
-        update(level, new SyncedAnimationState(target, old.animation(), level.getGameTime(), time, old.speed(),
-            old.loopMode(), 0, false, false, nextSequence()));
+        update(level, new SyncedAnimationState(
+            target,
+            old.animation(),
+            level.getGameTime(),
+            time,
+            old.speed(),
+            old.loopMode(),
+            0.0f,
+            false,
+            false,
+            nextSequence()
+        ));
     }
 
     public void resume(ServerLevel level, AnimationTargetKey target) {
         requireServerThread();
         requireDimension(level, target);
         SyncedAnimationState old = states.get(target);
-        if (old == null || old.stopped() || old.playing()) return;
-        update(level, new SyncedAnimationState(target, old.animation(), level.getGameTime(), old.initialSeconds(),
-            old.speed(), old.loopMode(), 0, true, false, nextSequence()));
+        if (old == null || old.stopped() || old.playing()) {
+            return;
+        }
+        update(level, new SyncedAnimationState(
+            target,
+            old.animation(),
+            level.getGameTime(),
+            old.initialSeconds(),
+            old.speed(),
+            old.loopMode(),
+            0.0f,
+            true,
+            false,
+            nextSequence()
+        ));
     }
 
     public void stop(ServerLevel level, AnimationTargetKey target) {
@@ -71,16 +112,27 @@ public final class ServerAnimationManager {
         requireDimension(level, target);
         SyncedAnimationState old = states.remove(target);
         String animation = old == null ? "" : old.animation();
-        SyncedAnimationState state = new SyncedAnimationState(target, animation, level.getGameTime(), 0,
-            1, LoopMode.ONCE, 0, false, true, nextSequence());
+        SyncedAnimationState state = new SyncedAnimationState(
+            target,
+            animation,
+            level.getGameTime(),
+            0.0f,
+            1.0f,
+            LoopMode.ONCE,
+            0.0f,
+            false,
+            true,
+            nextSequence()
+        );
         broadcast(level, state);
     }
 
     public void sendSnapshot(ServerPlayer player) {
         requireServerThread();
+        long dispatchTick = player.serverLevel().getGameTime();
         for (SyncedAnimationState state : states.values()) {
             if (state.target().dimension().equals(player.level().dimension().location())) {
-                GltfNetwork.send(player, new AnimationStatePacket(state));
+                GltfNetwork.send(player, new AnimationStatePacket(state, dispatchTick));
             }
         }
     }
@@ -96,21 +148,29 @@ public final class ServerAnimationManager {
     }
 
     private static void broadcast(ServerLevel level, SyncedAnimationState state) {
-        AnimationStatePacket packet = new AnimationStatePacket(state);
-        for (ServerPlayer player : level.players()) GltfNetwork.send(player, packet);
+        AnimationStatePacket packet = new AnimationStatePacket(state, level.getGameTime());
+        for (ServerPlayer player : level.players()) {
+            GltfNetwork.send(player, packet);
+        }
     }
 
     private void requireServerThread() {
         MinecraftServer currentServer = server.get();
-        if (currentServer == null) throw new IllegalStateException("Minecraft server is no longer available");
+        if (currentServer == null) {
+            throw new IllegalStateException("Minecraft server is no longer available");
+        }
         if (!currentServer.isSameThread()) {
-            throw new IllegalStateException("Server animation state must be changed on the Minecraft server thread");
+            throw new IllegalStateException(
+                "Server animation state must be changed on the Minecraft server thread"
+            );
         }
     }
 
     private long nextSequence() {
         long next = sequence.incrementAndGet();
-        if (next < 0) throw new IllegalStateException("Animation sequence overflow");
+        if (next < 0L) {
+            throw new IllegalStateException("Animation sequence overflow");
+        }
         return next;
     }
 
