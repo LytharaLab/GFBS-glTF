@@ -144,7 +144,7 @@ GFBS: glTF is a general model runtime. Project-specific entity behavior, gamepla
 - Document behavior that exists in the submitted code, not planned or private functionality.
 - Keep examples compilable whenever practical.
 - Use relative links for repository files and verify that every link resolves.
-- Update `README.md` and `docs/1.0-API.md` when changing public behavior.
+- Update `README.md` and `docs/1.x-API.md` when changing public behavior.
 - Preserve the ModelLoader acknowledgement in repository-facing attribution sections.
 
 ## Tests

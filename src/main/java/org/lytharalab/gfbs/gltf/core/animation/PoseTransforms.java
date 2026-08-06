@@ -66,9 +66,23 @@ public final class PoseTransforms {
     public static float[] localMatrix(GltfNode node, NodePose pose) {
         float[] fixed = node.matrix();
         if (fixed != null) return fixed;
-        float[] rotation = pose.rotation();
-        float[] scale = pose.scale();
-        float[] translation = pose.translation();
+        return trsMatrix(pose.translation(), pose.rotation(), pose.scale());
+    }
+
+    /** Builds a validated column-major local matrix from glTF translation/rotation/scale values. */
+    public static float[] trsMatrix(float[] translation, float[] rotation, float[] scale) {
+        if (translation == null || translation.length != 3) {
+            throw new IllegalArgumentException("Translation requires three components");
+        }
+        if (rotation == null || rotation.length != 4) {
+            throw new IllegalArgumentException("Rotation requires four components");
+        }
+        if (scale == null || scale.length != 3) {
+            throw new IllegalArgumentException("Scale requires three components");
+        }
+        for (float value : translation) checked(value);
+        for (float value : rotation) checked(value);
+        for (float value : scale) checked(value);
         float x = rotation[0], y = rotation[1], z = rotation[2], w = rotation[3];
         float sx = scale[0], sy = scale[1], sz = scale[2];
         float[] m = new float[16];

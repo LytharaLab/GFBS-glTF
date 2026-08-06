@@ -8,6 +8,7 @@ import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.lytharalab.gfbs.gltf.api.animation.ModelPose;
 import org.lytharalab.gfbs.gltf.api.client.GltfInstance;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveKey;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
 import org.lytharalab.gfbs.gltf.api.model.GltfBounds;
 import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
@@ -129,7 +130,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
         }
         refreshSelection();
         ModelPose pose = instance.animations().pose();
-        float[] world = PoseTransforms.computeWorldMatrices(pose);
+        float[] world = instance.nodes().computeWorldMatrices(pose);
         long currentSignature = computeSignature(world, pose);
         if (!dirty && currentSignature == signature) return;
         signature = currentSignature;
@@ -220,8 +221,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
         forEachPrimitive((nodeIndex, mesh, primitive) -> {
             if (!isTriangleMode(primitive.mode())) return;
             float[] positions = primitive.positions();
-            float[] morphWeights = pose.node(nodeIndex).weights();
-            if (morphWeights == null) morphWeights = mesh.defaultMorphWeights();
+            float[] morphWeights = instance.nodes().resolveMorphWeights(nodeIndex, mesh, pose);
             applyMorphs(primitive, morphWeights, positions);
             GltfNode node = asset.nodes().get(nodeIndex);
             if (node.skin() >= 0 && primitive.joints() != null && primitive.weights() != null) {
@@ -275,13 +275,18 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
 
     private long computeSignature(float[] world, ModelPose pose) {
         long result = options.signature();
+        result = result * 31 + Long.hashCode(instance.nodes().collisionRevision());
         float[] transform = modelToWorld.get(new float[16]);
         for (float value : transform) result = result * 31 + Float.floatToIntBits(value);
         for (float value : world) result = result * 31 + Float.floatToIntBits(value);
         for (int node = 0; node < instance.asset().nodes().size(); node++) {
-            float[] weights = pose.node(node).weights();
-            if (weights != null) {
-                for (float weight : weights) result = result * 31 + Float.floatToIntBits(weight);
+            for (int meshIndex : instance.asset().nodes().get(node).meshes()) {
+                float[] weights = instance.nodes().resolveMorphWeights(
+                    node, instance.asset().meshes().get(meshIndex), pose
+                );
+                if (weights != null) {
+                    for (float weight : weights) result = result * 31 + Float.floatToIntBits(weight);
+                }
             }
         }
         return result;
@@ -294,11 +299,15 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     private void forEachPrimitive(PrimitiveConsumer consumer) {
         GltfAsset asset = instance.asset();
         for (int nodeIndex = 0; nodeIndex < asset.nodes().size(); nodeIndex++) {
-            if (!selectedNodes[nodeIndex]) continue;
+            if (!selectedNodes[nodeIndex] || !instance.nodes().node(nodeIndex).collisionEnabled()) continue;
             GltfNode node = asset.nodes().get(nodeIndex);
             for (int meshIndex : node.meshes()) {
                 GltfMesh mesh = asset.meshes().get(meshIndex);
-                for (GltfPrimitive primitive : mesh.primitives()) {
+                for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
+                    if (!instance.nodes().primitive(
+                        new GltfPrimitiveKey(nodeIndex, meshIndex, primitiveIndex)
+                    ).collisionEnabled()) continue;
+                    GltfPrimitive primitive = mesh.primitives().get(primitiveIndex);
                     consumer.accept(nodeIndex, mesh, primitive);
                 }
             }
