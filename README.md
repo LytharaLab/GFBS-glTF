@@ -10,14 +10,14 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 - [Releases](https://github.com/LytharaLab/GFBS-glTF/releases)
 - [Issue tracker](https://github.com/LytharaLab/GFBS-glTF/issues)
 - [Pull requests](https://github.com/LytharaLab/GFBS-glTF/pulls)
-- [1.x API guide](docs/1.0-API.md)
+- [1.x API guide](docs/1.x-API.md)
 
 ## Status and compatibility
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.2.0` |
-| Public API | `1.2` |
+| GFBS: glTF | `1.3.0` |
+| Public API | `1.3` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -31,7 +31,9 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Asynchronous client-side loading with request deduplication, caching, invalidation, and resource-pack reload support.
 - External files, data URIs, sparse accessors, multiple scenes, indexed geometry, and all seven glTF primitive modes.
 - Immutable runtime assets with validated node, mesh, material, skin, animation, texture, and scene references.
-- Per-instance scenes, visibility, node-subtree visibility, render settings, animation state, and collision state.
+- Complete per-instance node graph with indexed/name/path lookup, duplicate-name handling, subtree
+  operations, self/subtree visibility, TRS/matrix/post-transform overrides, morph weights, render,
+  shadow, collision, custom parameters, and per-primitive state.
 - Translation, rotation, scale, skinning, morph targets, generated normals, tangents, vertex colors, and two UV sets.
 - Complete glTF 2.0 metallic-roughness material ingestion: base color, metallic-roughness,
   normal, occlusion, emissive, alpha modes/cutoff, double-sided state, and sampler state.
@@ -39,6 +41,9 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
   `KHR_materials_unlit`, and `KHR_materials_emissive_strength`.
 - A dedicated full-bright emissive pass that samples the actual emissive texture instead of
   making the entire base material full-bright.
+- General runtime material switching per primitive: source-material replacement, named reusable
+  variants, complete sparse overrides for every glTF material property, and `PBR`, `UNLIT`, or
+  game-style `NEON` shading without mutating shared assets.
 - Animation playback, seeking, pausing, transitions, layers, masks, additive blending, fades, and user-defined events.
 - Latency-tolerant server-authoritative animation synchronization for entities, block entities, and custom targets, with RTT clock probes, actual-TPS estimation, fractional-tick prediction, smooth speed correction, and sequence ordering.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
@@ -140,6 +145,66 @@ Close an instance when it is no longer used, especially when collision has been 
 instance.close();
 ```
 
+## Runtime node and material state in 1.3.0
+
+Every `GltfInstance` owns a complete mutable state graph through `instance.nodes()`. Imported
+`GltfAsset`, `GltfNode`, and `GltfMaterial` objects remain immutable and safe to share; all live
+changes are isolated to that instance.
+
+Nodes can be selected by index, exact name, or hierarchy path. A path is the unambiguous choice
+when an asset legitimately contains duplicate names:
+
+```java
+GltfNodeState panel = instance.nodes().requirePath("/reactor/console/service_panel");
+
+panel.selfVisible(false);          // Hide only this node's meshes.
+panel.subtreeVisible(true);        // Keep traversal of children enabled.
+panel.translation(0.0f, 0.25f, 0.0f);
+panel.alpha(0.8f);
+panel.castShadows(false);
+panel.parameter("owner", blockEntityId);
+```
+
+`instance.nodes().snapshot()` captures the complete node/primitive/variant state for transactional
+changes, presets, rollback, or temporary effects; restore it with `instance.nodes().restore(...)`.
+Custom parameter values are copied shallowly because their application-defined object types are
+unknown to GFBS: glTF.
+
+Matrix-authored nodes use `localMatrix(...)` for complete replacement or
+`postTransform(...)` for an additional transform. TRS-authored nodes support independent
+translation, quaternion rotation, scale, and morph-weight overrides. The same resolved transforms
+and morph weights are used by rendering and enabled collision.
+
+Material switching is not tied to indicator lights. A `GltfMaterialVariant` can replace the
+source material by index or name, override any combination of base color/texture,
+metallic-roughness, normal, occlusion, emissive, alpha, double-sided, and shading properties, or
+combine replacement and overrides. Variants can be applied to any primitive or an entire node
+subtree:
+
+```java
+GltfNodeManager nodes = instance.nodes();
+
+nodes.defineVariant("plastic", GltfMaterialVariant.override(
+    GltfMaterialOverride.builder()
+        .shadingMode(GltfShadingMode.PBR)
+        .build()
+));
+nodes.defineVariant("neon", GltfMaterialVariant.override(
+    GltfMaterialOverride.builder()
+        .shadingMode(GltfShadingMode.NEON)
+        .neonStrength(4.0f)
+        .build()
+));
+
+GltfPrimitiveState surface = nodes.primitive(nodeIndex, meshIndex, primitiveIndex);
+surface.variant(powered ? "neon" : "plastic");
+```
+
+`NEON` makes the effective base surface full-bright and feeds the same base color/texture into the
+dedicated emissive pass, allowing shader-pack bloom. It deliberately does not create block light
+or a dynamic point light. Resolved variants are cached, so repeatedly switching between reusable
+states does not rebuild runtime materials every frame.
+
 ## Animation synchronization in 1.2.0
 
 GFBS: glTF 1.2.0 keeps animation commands server-authoritative without streaming bones or
@@ -197,11 +262,11 @@ Every atlas texture used by the glTF material must be declared in the model JSON
 material index or glTF material name through `material_textures`; `material_0`, material-name,
 `texture`, and `particle` slots are used as fallbacks. The API guide documents every option.
 
-See the [GFBS: glTF 1.x API guide](docs/1.0-API.md) for loading, animation, rendering, synchronization, importers, culling, RenderTypes, collision, and migration details.
+See the [GFBS: glTF 1.x API guide](docs/1.x-API.md) for loading, animation, rendering, synchronization, node state, material variants, importers, culling, RenderTypes, collision, and migration details.
 
 ## Rendering policy
 
-GFBS: glTF 1.2 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
+GFBS: glTF 1.3 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
 
 - Without a shader pack, base textures retain Minecraft entity lighting while emissive factors
   and textures are rendered in an independent full-bright additive pass.

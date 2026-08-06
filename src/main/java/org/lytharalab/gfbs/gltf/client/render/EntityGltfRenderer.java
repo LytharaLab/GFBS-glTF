@@ -17,6 +17,10 @@ import org.lytharalab.gfbs.gltf.api.client.GltfRenderContext;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderOptions;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderPart;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderTypes;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfNodeManager;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfNodeState;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveKey;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveState;
 import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
@@ -71,7 +75,7 @@ public final class EntityGltfRenderer {
         if (shadowPass && !options.castShadows()) return;
         boolean shaderPack = !shadowPass && OculusCompat.shadersEnabled();
         ModelPose pose = instance.animations().pose();
-        float[] world = PoseTransforms.computeWorldMatrices(pose);
+        float[] world = instance.nodes().computeWorldMatrices(pose);
         Matrix4f base = new Matrix4f(poseStack.last().pose());
         List<DrawItem> candidates = collect(
             instance, gpu, options, context, shaderPack, shadowPass, pose, world, base
@@ -98,7 +102,7 @@ public final class EntityGltfRenderer {
 
         for (DrawItem item : visible) {
             int light = shadowPass
-                || options.lightMode() == GltfRenderOptions.LightMode.FULLBRIGHT
+                || item.fullBright
                 || item.material.unlit()
                 || item.pass.kind == PassKind.EMISSIVE ? LightTexture.FULL_BRIGHT : packedLight;
             emitPrimitive(
@@ -113,7 +117,7 @@ public final class EntityGltfRenderer {
                 item.morphWeights,
                 light,
                 packedOverlay,
-                options.alpha()
+                item.alpha
             );
         }
 
@@ -146,7 +150,8 @@ public final class EntityGltfRenderer {
         for (int i = roots.length - 1; i >= 0; i--) pending.push(roots[i]);
         while (!pending.isEmpty()) {
             int nodeIndex = pending.pop();
-            if (!instance.nodeVisible(nodeIndex) || instance.collision().isNodeHidden(nodeIndex)) continue;
+            GltfNodeState nodeState = instance.nodes().node(nodeIndex);
+            if (!nodeState.subtreeVisible() || instance.collision().isNodeHidden(nodeIndex)) continue;
             GltfNode node = asset.nodes().get(nodeIndex);
             Matrix4f model = new Matrix4f(base).mul(new Matrix4f().set(world, nodeIndex * 16));
             Matrix3f normalMatrix = normalMatrix(model);
@@ -157,65 +162,83 @@ public final class EntityGltfRenderer {
                 jointCount = gltfSkin.joints().length;
                 skin = PoseTransforms.computeSkinPalette(gltfSkin, nodeIndex, world);
             }
-            for (int meshIndex : node.meshes()) {
-                GltfMesh mesh = asset.meshes().get(meshIndex);
-                float[] morphWeights = pose.node(nodeIndex).weights();
-                if (morphWeights == null) morphWeights = mesh.defaultMorphWeights();
-                for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
-                    GltfPrimitive primitive = mesh.primitives().get(primitiveIndex);
-                    if (shadowPass && !isTriangleMode(primitive.mode())) continue;
-                    GltfRenderPart part = new GltfRenderPart(
-                        nodeIndex, node.name(), meshIndex, primitiveIndex, primitive.material()
-                    );
-                    if (!options.partFilter().test(part)) continue;
-                    if (!shadowPass
-                        && !GltfPrimitiveCuller.isVisible(primitive, model, context, options)) continue;
-                    GltfMaterial material = asset.materials().get(primitive.material());
-                    ResourceLocationHolder texture = new ResourceLocationHolder(
-                        gpu.materialTexture(primitive.material(), shaderPack)
-                    );
-                    RenderType renderType = shadowPass
-                        ? resolveShadowRenderType(material, texture, options)
-                        : resolveRenderType(part, primitive, material, texture, options);
-                    double depth = transformDepth(
-                        model,
-                        primitive.bounds().centerX(),
-                        primitive.bounds().centerY(),
-                        primitive.bounds().centerZ()
-                    );
-                    items.add(new DrawItem(
-                        primitive, material, MaterialPass.base(material), renderType,
-                        new Matrix4f(model), new Matrix3f(normalMatrix),
-                        skin, jointCount, morphWeights, depth,
-                        new GltfOcclusionCuller.QueryKey(
+            if (nodeState.selfVisible()) {
+                for (int meshIndex : node.meshes()) {
+                    GltfMesh mesh = asset.meshes().get(meshIndex);
+                    float[] morphWeights = instance.nodes().resolveMorphWeights(nodeIndex, mesh, pose);
+                    for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
+                        GltfPrimitive primitive = mesh.primitives().get(primitiveIndex);
+                        GltfPrimitiveState primitiveState = instance.nodes().primitive(
+                            new GltfPrimitiveKey(nodeIndex, meshIndex, primitiveIndex)
+                        );
+                        if (!primitiveState.visible()) continue;
+                        if (shadowPass && (!isTriangleMode(primitive.mode())
+                            || !nodeState.castShadows() || !primitiveState.castShadows())) continue;
+                        GltfMaterial material = primitiveState.effectiveMaterial();
+                        GltfRenderPart part = new GltfRenderPart(
+                            nodeIndex, node.name(), meshIndex, primitiveIndex,
+                            primitiveState.effectiveMaterialIndex()
+                        );
+                        if (!options.partFilter().test(part)) continue;
+                        if (!shadowPass
+                            && !GltfPrimitiveCuller.isVisible(primitive, model, context, options)) continue;
+                        GltfRenderOptions.CullMode cullMode = resolveCullMode(
+                            options, nodeState, primitiveState
+                        );
+                        ResourceLocationHolder texture = new ResourceLocationHolder(
+                            gpu.materialTexture(material, shaderPack)
+                        );
+                        RenderType renderType = shadowPass
+                            ? resolveShadowRenderType(material, texture, cullMode)
+                            : resolveRenderType(
+                                part, primitive, material, texture, options, primitiveState, cullMode
+                            );
+                        double depth = transformDepth(
+                            model,
+                            primitive.bounds().centerX(),
+                            primitive.bounds().centerY(),
+                            primitive.bounds().centerZ()
+                        );
+                        float[] tint = multiplyColor(nodeState, primitiveState);
+                        float alpha = options.alpha() * nodeState.alpha() * primitiveState.alpha();
+                        GltfRenderOptions.LightMode lightMode = primitiveState.lightMode().orElse(
+                            nodeState.lightMode().orElse(options.lightMode())
+                        );
+                        boolean fullBright = lightMode == GltfRenderOptions.LightMode.FULLBRIGHT;
+                        GltfOcclusionCuller.QueryKey queryKey = new GltfOcclusionCuller.QueryKey(
                             instance.id(), nodeIndex, meshIndex, primitiveIndex
-                        )
-                    ));
-                    if (!shadowPass && hasVisibleEmission(material)) {
-                        ResourceLocationHolder emissiveTexture = new ResourceLocationHolder(
-                            gpu.emissiveTexture(primitive.material())
                         );
-                        RenderType emissiveRenderType = resolveEmissiveRenderType(
-                            primitive, material, emissiveTexture, options
-                        );
-                        int emissivePasses = emissivePassCount(material);
-                        float passStrength = material.emissiveStrength() / emissivePasses;
-                        for (int pass = 0; pass < emissivePasses; pass++) {
-                            items.add(new DrawItem(
-                                primitive,
-                                material,
-                                MaterialPass.emissive(material, passStrength),
-                                emissiveRenderType,
-                                new Matrix4f(model),
-                                new Matrix3f(normalMatrix),
-                                skin,
-                                jointCount,
-                                morphWeights,
-                                depth,
-                                new GltfOcclusionCuller.QueryKey(
-                                    instance.id(), nodeIndex, meshIndex, primitiveIndex
-                                )
-                            ));
+                        items.add(new DrawItem(
+                            primitive, material, MaterialPass.base(material, tint), renderType,
+                            new Matrix4f(model), new Matrix3f(normalMatrix),
+                            skin, jointCount, morphWeights, depth, queryKey, fullBright, alpha
+                        ));
+                        if (!shadowPass && hasVisibleEmission(material)) {
+                            ResourceLocationHolder emissiveTexture = new ResourceLocationHolder(
+                                gpu.emissiveTexture(material)
+                            );
+                            RenderType emissiveRenderType = resolveEmissiveRenderType(
+                                primitive, material, emissiveTexture, cullMode
+                            );
+                            int emissivePasses = emissivePassCount(material);
+                            float passStrength = material.emissiveStrength() / emissivePasses;
+                            for (int pass = 0; pass < emissivePasses; pass++) {
+                                items.add(new DrawItem(
+                                    primitive,
+                                    material,
+                                    MaterialPass.emissive(material, passStrength, tint),
+                                    emissiveRenderType,
+                                    new Matrix4f(model),
+                                    new Matrix3f(normalMatrix),
+                                    skin,
+                                    jointCount,
+                                    morphWeights,
+                                    depth,
+                                    queryKey,
+                                    true,
+                                    alpha
+                                ));
+                            }
                         }
                     }
                 }
@@ -228,8 +251,8 @@ public final class EntityGltfRenderer {
 
     private static RenderType resolveShadowRenderType(GltfMaterial material,
                                                       ResourceLocationHolder texture,
-                                                      GltfRenderOptions options) {
-        boolean cull = switch (options.cullMode()) {
+                                                      GltfRenderOptions.CullMode cullMode) {
+        boolean cull = switch (cullMode) {
             case FORCE_CULL -> true;
             case FORCE_NO_CULL -> false;
             case AUTO -> !material.doubleSided();
@@ -241,8 +264,11 @@ public final class EntityGltfRenderer {
 
     private static RenderType resolveRenderType(GltfRenderPart part, GltfPrimitive primitive,
                                                 GltfMaterial material, ResourceLocationHolder texture,
-                                                GltfRenderOptions options) {
-        RenderType custom = options.nodeRenderTypes().get(part.nodeName());
+                                                GltfRenderOptions options,
+                                                GltfPrimitiveState primitiveState,
+                                                GltfRenderOptions.CullMode cullMode) {
+        RenderType custom = primitiveState.renderType().orElse(null);
+        if (custom == null) custom = options.nodeRenderTypes().get(part.nodeName());
         if (custom == null && options.renderTypeFactory() != null) {
             custom = options.renderTypeFactory().apply(part, material);
         }
@@ -261,7 +287,7 @@ public final class EntityGltfRenderer {
         if (!isTriangleMode(primitive.mode())) {
             return GltfRenderTypes.lines(texture.value, material.alphaMode() == AlphaMode.BLEND);
         }
-        boolean cull = switch (options.cullMode()) {
+        boolean cull = switch (cullMode) {
             case FORCE_CULL -> true;
             case FORCE_NO_CULL -> false;
             case AUTO -> !material.doubleSided();
@@ -277,9 +303,9 @@ public final class EntityGltfRenderer {
         GltfPrimitive primitive,
         GltfMaterial material,
         ResourceLocationHolder texture,
-        GltfRenderOptions options
+        GltfRenderOptions.CullMode cullMode
     ) {
-        boolean cull = switch (options.cullMode()) {
+        boolean cull = switch (cullMode) {
             case FORCE_CULL -> true;
             case FORCE_NO_CULL -> false;
             case AUTO -> !material.doubleSided();
@@ -289,6 +315,20 @@ public final class EntityGltfRenderer {
             cull,
             !isTriangleMode(primitive.mode())
         );
+    }
+
+    private static GltfRenderOptions.CullMode resolveCullMode(
+        GltfRenderOptions options,
+        GltfNodeState node,
+        GltfPrimitiveState primitive
+    ) {
+        return primitive.cullMode().orElse(node.cullMode().orElse(options.cullMode()));
+    }
+
+    private static float[] multiplyColor(GltfNodeState node, GltfPrimitiveState primitive) {
+        float[] a = node.colorMultiplier();
+        float[] b = primitive.colorMultiplier();
+        return new float[]{a[0] * b[0], a[1] * b[1], a[2] * b[2]};
     }
 
     private static boolean modeCompatible(VertexFormat.Mode renderMode, PrimitiveMode primitiveMode) {
@@ -481,9 +521,12 @@ public final class EntityGltfRenderer {
         float outputAlpha;
         if (pass.kind == PassKind.BASE) {
             float[] base = material.baseColor();
-            red = (colors == null ? 1.0f : colors[vertex * colorComponents]) * base[0];
-            green = (colors == null ? 1.0f : colors[vertex * colorComponents + 1]) * base[1];
-            blue = (colors == null ? 1.0f : colors[vertex * colorComponents + 2]) * base[2];
+            red = (colors == null ? 1.0f : colors[vertex * colorComponents])
+                * base[0] * pass.redMultiplier;
+            green = (colors == null ? 1.0f : colors[vertex * colorComponents + 1])
+                * base[1] * pass.greenMultiplier;
+            blue = (colors == null ? 1.0f : colors[vertex * colorComponents + 2])
+                * base[2] * pass.blueMultiplier;
             float vertexAlpha = colors == null || colorComponents < 4
                 ? 1.0f : colors[vertex * colorComponents + 3];
             float factorAlpha = material.alphaMode() == AlphaMode.MASK ? 1.0f : base[3];
@@ -491,9 +534,9 @@ public final class EntityGltfRenderer {
         } else {
             float[] emissive = material.emissive();
             float strength = pass.colorScale * alpha;
-            red = emissive[0] * strength;
-            green = emissive[1] * strength;
-            blue = emissive[2] * strength;
+            red = emissive[0] * strength * pass.redMultiplier;
+            green = emissive[1] * strength * pass.greenMultiplier;
+            blue = emissive[2] * strength * pass.blueMultiplier;
             outputAlpha = 1.0f;
         }
         GltfTextureInfo textureInfo = pass.textureInfo;
@@ -546,7 +589,8 @@ public final class EntityGltfRenderer {
                             MaterialPass pass, RenderType renderType,
                             Matrix4f model, Matrix3f normalMatrix,
                             float[] skin, int jointCount, float[] morphWeights, double depth,
-                            GltfOcclusionCuller.QueryKey queryKey) {
+                            GltfOcclusionCuller.QueryKey queryKey,
+                            boolean fullBright, float alpha) {
     }
 
     private enum PassKind {
@@ -554,16 +598,22 @@ public final class EntityGltfRenderer {
         EMISSIVE
     }
 
-    private record MaterialPass(PassKind kind, GltfTextureInfo textureInfo, float colorScale) {
-        private static MaterialPass base(GltfMaterial material) {
-            return new MaterialPass(PassKind.BASE, material.baseColorTextureInfo(), 1.0f);
+    private record MaterialPass(PassKind kind, GltfTextureInfo textureInfo, float colorScale,
+                                float redMultiplier, float greenMultiplier,
+                                float blueMultiplier) {
+        private static MaterialPass base(GltfMaterial material, float[] tint) {
+            return new MaterialPass(
+                PassKind.BASE, material.baseColorTextureInfo(), 1.0f,
+                tint[0], tint[1], tint[2]
+            );
         }
 
-        private static MaterialPass emissive(GltfMaterial material, float strength) {
+        private static MaterialPass emissive(GltfMaterial material, float strength, float[] tint) {
             return new MaterialPass(
                 PassKind.EMISSIVE,
                 material.emissiveTextureInfo(),
-                strength
+                strength,
+                tint[0], tint[1], tint[2]
             );
         }
     }

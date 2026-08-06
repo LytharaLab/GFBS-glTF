@@ -20,7 +20,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -37,6 +39,10 @@ final class GltfGpuModel {
     private final List<ResourceLocation> maskTextures = new ArrayList<>();
     private final List<ResourceLocation> materialTextures = new ArrayList<>();
     private final List<GltfMaterialTexture> materialTextureObjects = new ArrayList<>();
+    private final Map<GltfMaterial, Integer> originalMaterialIndices = new IdentityHashMap<>();
+    private final Map<GltfMaterial, ResourceLocation> runtimeMaskTextures = new IdentityHashMap<>();
+    private final Map<GltfMaterial, ResourceLocation> runtimeMaterialTextures = new IdentityHashMap<>();
+    private final Map<GltfMaterial, GltfMaterialTexture> runtimeMaterialTextureObjects = new IdentityHashMap<>();
     private final String runtimeId = Long.toUnsignedString(NEXT_RUNTIME_ID.incrementAndGet(), 36);
     private ResourceLocation whiteTexture;
     private boolean pbrUploaded;
@@ -46,6 +52,9 @@ final class GltfGpuModel {
     GltfGpuModel(GltfAsset asset) {
         RenderSystem.assertOnRenderThread();
         this.asset = asset;
+        for (int index = 0; index < asset.materials().size(); index++) {
+            originalMaterialIndices.put(asset.materials().get(index), index);
+        }
         try {
             uploadTextures();
             uploadWhiteTexture();
@@ -62,22 +71,25 @@ final class GltfGpuModel {
         }
     }
 
-    ResourceLocation materialTexture(int materialIndex, boolean shaderPackActive) {
+    ResourceLocation materialTexture(GltfMaterial material, boolean shaderPackActive) {
         if (shaderPackActive && OculusCompat.installed()) {
             ensurePbrTextures();
-            if (pbrAvailable) return materialTextures.get(materialIndex);
+            if (pbrAvailable) {
+                Integer original = originalMaterialIndices.get(material);
+                return original == null
+                    ? runtimeMaterialTexture(material)
+                    : materialTextures.get(original);
+            }
         }
-        GltfMaterial material = asset.materials().get(materialIndex);
         if (material.alphaMode() == AlphaMode.MASK) {
-            return maskTexture(materialIndex);
+            return maskTexture(material);
         }
         return material.baseColorTexture() < 0
             ? whiteTexture
             : textures.get(material.baseColorTexture());
     }
 
-    ResourceLocation emissiveTexture(int materialIndex) {
-        GltfMaterial material = asset.materials().get(materialIndex);
+    ResourceLocation emissiveTexture(GltfMaterial material) {
         return material.emissiveTexture() < 0
             ? whiteTexture
             : textures.get(material.emissiveTexture());
@@ -139,6 +151,42 @@ final class GltfGpuModel {
                 } else if (dynamic != null) {
                     dynamic.close();
                 }
+            }
+        }
+    }
+
+    private ResourceLocation maskTexture(GltfMaterial material) {
+        Integer original = originalMaterialIndices.get(material);
+        if (original != null) return maskTexture(original);
+        ResourceLocation existing = runtimeMaskTextures.get(material);
+        if (existing != null) return existing;
+        RenderSystem.assertOnRenderThread();
+        NativeImage image = null;
+        DynamicTexture dynamic = null;
+        ResourceLocation location = null;
+        boolean registered = false;
+        boolean committed = false;
+        try {
+            image = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
+            applyAlphaMask(image, material);
+            dynamic = new DynamicTexture(image);
+            image = null;
+            GltfTexture sampler = material.baseColorTexture() < 0
+                ? null : asset.textures().get(material.baseColorTexture());
+            location = runtimeLocation("mask/variant/" + runtimeMaskTextures.size());
+            Minecraft.getInstance().getTextureManager().register(location, dynamic);
+            registered = true;
+            configureSampler(dynamic, sampler);
+            runtimeMaskTextures.put(material, location);
+            committed = true;
+            return location;
+        } catch (IOException exception) {
+            throw new IllegalArgumentException("Invalid runtime masked material in " + asset.id(), exception);
+        } finally {
+            if (image != null) image.close();
+            if (!committed) {
+                if (registered && location != null) Minecraft.getInstance().getTextureManager().release(location);
+                else if (dynamic != null) dynamic.close();
             }
         }
     }
@@ -251,6 +299,55 @@ final class GltfGpuModel {
                     materialTexture.closeCompanions();
                     materialTexture.close();
                 }
+            }
+        }
+    }
+
+    private ResourceLocation runtimeMaterialTexture(GltfMaterial material) {
+        ResourceLocation existing = runtimeMaterialTextures.get(material);
+        if (existing != null) return existing;
+        RenderSystem.assertOnRenderThread();
+        NativeImage base = null;
+        NativeImage normal = null;
+        NativeImage occlusion = null;
+        NativeImage metallicRoughness = null;
+        GltfMaterialTexture materialTexture = null;
+        ResourceLocation location = null;
+        boolean registered = false;
+        boolean committed = false;
+        try {
+            base = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
+            if (material.alphaMode() == AlphaMode.MASK) applyAlphaMask(base, material);
+            normal = decodeOptional(material.normalTexture());
+            occlusion = decodeOptional(material.occlusionTexture());
+            metallicRoughness = decodeOptional(material.metallicRoughnessTexture());
+            materialTexture = new GltfMaterialTexture(
+                base,
+                createLabPbrNormal(base, normal, occlusion, material),
+                createLabPbrSpecular(base, metallicRoughness, material)
+            );
+            base = null;
+            materialTexture.setFilter(true, true);
+            materialTexture.normalTexture().setFilter(true, true);
+            materialTexture.specularTexture().setFilter(true, true);
+            location = runtimeLocation("material/variant/" + runtimeMaterialTextures.size());
+            Minecraft.getInstance().getTextureManager().register(location, materialTexture);
+            registered = true;
+            runtimeMaterialTextures.put(material, location);
+            runtimeMaterialTextureObjects.put(material, materialTexture);
+            committed = true;
+            return location;
+        } catch (IOException exception) {
+            throw new IllegalArgumentException("Invalid runtime PBR material in " + asset.id(), exception);
+        } finally {
+            if (base != null) base.close();
+            if (normal != null) normal.close();
+            if (occlusion != null) occlusion.close();
+            if (metallicRoughness != null) metallicRoughness.close();
+            if (!committed && materialTexture != null) {
+                materialTexture.closeCompanions();
+                if (registered && location != null) Minecraft.getInstance().getTextureManager().release(location);
+                else materialTexture.close();
             }
         }
     }
@@ -398,6 +495,10 @@ final class GltfGpuModel {
             if (texture != null) Minecraft.getInstance().getTextureManager().release(texture);
         }
         maskTextures.clear();
+        for (ResourceLocation texture : runtimeMaskTextures.values()) {
+            Minecraft.getInstance().getTextureManager().release(texture);
+        }
+        runtimeMaskTextures.clear();
         if (whiteTexture != null) {
             Minecraft.getInstance().getTextureManager().release(whiteTexture);
             whiteTexture = null;
@@ -412,6 +513,13 @@ final class GltfGpuModel {
         }
         materialTextures.clear();
         materialTextureObjects.clear();
+        for (Map.Entry<GltfMaterial, ResourceLocation> entry : runtimeMaterialTextures.entrySet()) {
+            GltfMaterialTexture texture = runtimeMaterialTextureObjects.get(entry.getKey());
+            if (texture != null) texture.closeCompanions();
+            Minecraft.getInstance().getTextureManager().release(entry.getValue());
+        }
+        runtimeMaterialTextures.clear();
+        runtimeMaterialTextureObjects.clear();
         pbrUploaded = false;
         pbrAvailable = false;
     }
