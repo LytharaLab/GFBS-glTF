@@ -20,4 +20,7 @@ public record GltfMesh(String name, List<GltfPrimitive> primitives, float[] defa
     public float[] defaultMorphWeights() {
         return defaultMorphWeights == null ? null : defaultMorphWeights.clone();
     }
+
+    /** Package-private zero-copy view used by the renderer hot path. */
+    float[] defaultMorphWeightsView() { return defaultMorphWeights; }
 }

@@ -31,4 +31,10 @@ public record GltfRenderContext(Matrix4f projection, Frustum frustum,
     public Matrix4f projection() {
         return projection == null ? null : new Matrix4f(projection);
     }
+
+    /**
+     * Read-only projection view for renderer hot paths. Unlike {@link #projection()}, this does not
+     * allocate a defensive matrix copy. Integrations must never mutate the returned matrix.
+     */
+    public Matrix4f projectionView() { return projection; }
 }

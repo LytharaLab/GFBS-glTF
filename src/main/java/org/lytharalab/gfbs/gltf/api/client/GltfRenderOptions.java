@@ -23,7 +23,9 @@ public final class GltfRenderOptions {
     private RenderType overrideRenderType;
     private BiFunction<GltfRenderPart, GltfMaterial, RenderType> renderTypeFactory;
     private final Map<String, RenderType> nodeRenderTypes = new LinkedHashMap<>();
-    private Predicate<GltfRenderPart> partFilter = part -> true;
+    private static final Predicate<GltfRenderPart> ALL_PARTS = part -> true;
+    private Predicate<GltfRenderPart> partFilter = ALL_PARTS;
+    private boolean partFilterOverridden;
     private boolean validateRenderTypeFormat = true;
 
     public CullMode cullMode() { return cullMode; }
@@ -36,7 +38,14 @@ public final class GltfRenderOptions {
     public RenderType overrideRenderType() { return overrideRenderType; }
     public BiFunction<GltfRenderPart, GltfMaterial, RenderType> renderTypeFactory() { return renderTypeFactory; }
     public Map<String, RenderType> nodeRenderTypes() { return Map.copyOf(nodeRenderTypes); }
+    /** Allocation-free lookup for realtime renderers. */
+    public RenderType nodeRenderType(String nodeName) { return nodeRenderTypes.get(nodeName); }
+    public boolean hasNodeRenderTypes() { return !nodeRenderTypes.isEmpty(); }
+    public boolean hasRenderTypeOverrides() {
+        return overrideRenderType != null || renderTypeFactory != null || !nodeRenderTypes.isEmpty();
+    }
     public Predicate<GltfRenderPart> partFilter() { return partFilter; }
+    public boolean hasPartFilterOverride() { return partFilterOverridden; }
     public boolean validateRenderTypeFormat() { return validateRenderTypeFormat; }
 
     public GltfRenderOptions cull(CullMode mode) {
@@ -106,6 +115,7 @@ public final class GltfRenderOptions {
 
     public GltfRenderOptions partFilter(Predicate<GltfRenderPart> filter) {
         partFilter = Objects.requireNonNull(filter, "filter");
+        partFilterOverridden = partFilter != ALL_PARTS;
         return this;
     }
 
@@ -134,6 +144,7 @@ public final class GltfRenderOptions {
         copy.renderTypeFactory = renderTypeFactory;
         copy.nodeRenderTypes.putAll(nodeRenderTypes);
         copy.partFilter = partFilter;
+        copy.partFilterOverridden = partFilterOverridden;
         copy.validateRenderTypeFormat = validateRenderTypeFormat;
         return copy;
     }

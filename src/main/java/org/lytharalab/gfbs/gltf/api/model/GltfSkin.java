@@ -38,4 +38,8 @@ public record GltfSkin(String name, int skeletonRoot, int[] joints, float[] inve
 
     @Override
     public float[] inverseBindMatrices() { return inverseBindMatrices.clone(); }
+
+    /** Package-private zero-copy views used by the renderer hot path. */
+    int[] jointsView() { return joints; }
+    float[] inverseBindMatricesView() { return inverseBindMatrices; }
 }

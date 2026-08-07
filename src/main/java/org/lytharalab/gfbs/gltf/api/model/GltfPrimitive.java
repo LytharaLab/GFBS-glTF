@@ -158,4 +158,16 @@ public final class GltfPrimitive {
     public boolean hasDynamicGeometry() {
         return joints != null || !morphTargets.isEmpty();
     }
+
+    // Package-private zero-copy views used by the renderer. Public getters intentionally keep
+    // their defensive-copy contract; callers outside the model package must never receive these.
+    float[] positionsView() { return positions; }
+    float[] normalsView() { return normals; }
+    float[] tangentsView() { return tangents; }
+    float[] texCoords0View() { return texCoords0; }
+    float[] texCoords1View() { return texCoords1; }
+    float[] colorsView() { return colors; }
+    int[] jointsView() { return joints; }
+    float[] weightsView() { return weights; }
+    int[] indicesView() { return indices; }
 }

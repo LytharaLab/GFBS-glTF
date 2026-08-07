@@ -7,7 +7,10 @@
   "mixins": [
     "EntityCollisionMixin"
   ],
-  "client": [],
+  "client": [
+    "RenderSystemAccessor",
+    "FrustumInvoker"
+  ],
   "injectors": {
     "defaultRequire": 1
   },

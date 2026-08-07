@@ -66,6 +66,11 @@ public final class GltfNode {
     public int[] meshes() { return meshes.clone(); }
     public int skin() { return skin; }
     public float[] matrix() { return matrix == null ? null : matrix.clone(); }
+    public boolean hasMatrix() { return matrix != null; }
+    public void copyMatrixTo(float[] target) {
+        if (matrix == null) throw new IllegalStateException("Node has no fixed matrix");
+        copyTo(matrix, target, 16, "matrix");
+    }
     public float[] translation() { return translation.clone(); }
     public float[] rotation() { return rotation.clone(); }
     public float[] scale() { return scale.clone(); }

@@ -58,6 +58,12 @@ public final class GltfPrimitiveState {
     }
 
     public float[] colorMultiplier() { return colorMultiplier.clone(); }
+    public float colorRed() { return colorMultiplier[0]; }
+    public float colorGreen() { return colorMultiplier[1]; }
+    public float colorBlue() { return colorMultiplier[2]; }
+    public GltfRenderOptions.LightMode lightModeOrNull() { return lightMode; }
+    public GltfRenderOptions.CullMode cullModeOrNull() { return cullMode; }
+    public RenderType renderTypeOrNull() { return renderType; }
     public GltfPrimitiveState colorMultiplier(float red, float green, float blue) {
         colorMultiplier[0] = nonNegative(red, "Red multiplier");
         colorMultiplier[1] = nonNegative(green, "Green multiplier");

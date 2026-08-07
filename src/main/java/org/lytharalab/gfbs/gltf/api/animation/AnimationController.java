@@ -24,6 +24,7 @@ public final class AnimationController {
     private final LinkedHashMap<String, Track> tracks = new LinkedHashMap<>();
     private final Map<String, List<AnimationEvent>> events = new HashMap<>();
     private final CopyOnWriteArrayList<AnimationEventListener> listeners = new CopyOnWriteArrayList<>();
+    private long poseRevision;
 
     public AnimationController(GltfAsset asset) {
         this.asset = Objects.requireNonNull(asset, "asset");
@@ -95,6 +96,7 @@ public final class AnimationController {
         track.rate = seconds == 0.0f ? 0.0f : Math.abs(target - track.weight) / seconds;
         if (seconds == 0.0f) {
             track.weight = target;
+            evaluate();
         }
     }
 
@@ -191,33 +193,39 @@ public final class AnimationController {
         if (!Float.isFinite(deltaSeconds)) {
             throw new IllegalArgumentException("Delta time must be finite");
         }
-        if (deltaSeconds == 0.0f) {
-            return;
-        }
+        if (deltaSeconds == 0.0f || tracks.isEmpty()) return;
 
+        boolean dirty = false;
+        float elapsed = Math.abs(deltaSeconds);
         Iterator<Map.Entry<String, Track>> iterator = tracks.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, Track> entry = iterator.next();
             Track track = entry.getValue();
-            fade(track, Math.abs(deltaSeconds));
+            float beforeWeight = track.weight;
+            fade(track, elapsed);
+            dirty |= beforeWeight != track.weight;
             if (track.remove && track.weight <= 0.0f) {
                 iterator.remove();
+                dirty = true;
                 continue;
             }
-            if (track.playing) {
+            if (track.playing && track.speed != 0.0f) {
                 advance(entry.getKey(), track, deltaSeconds);
+                dirty = true;
             }
             if (track.source != null) {
+                float beforeTransition = track.transition;
                 track.transition = Math.min(
                     track.options.transitionSeconds(),
-                    track.transition + Math.abs(deltaSeconds)
+                    track.transition + elapsed
                 );
+                dirty |= beforeTransition != track.transition;
                 if (track.transition >= track.options.transitionSeconds()) {
                     track.source = null;
                 }
             }
         }
-        evaluate();
+        if (dirty) evaluate();
     }
 
     public void seek(float seconds) {
@@ -269,12 +277,16 @@ public final class AnimationController {
         tracks.clear();
         if (reset) {
             pose.reset();
+            poseRevision++;
         }
     }
 
     public ModelPose pose() {
         return pose;
     }
+
+    /** Monotonically increases whenever the evaluated pose changes. */
+    public long poseRevision() { return poseRevision; }
 
     public float time() {
         Track track = tracks.get(BASE_LAYER);
@@ -350,16 +362,29 @@ public final class AnimationController {
     }
 
     private void evaluate() {
+        // The overwhelmingly common realtime case (one full-weight base layer) does not need
+        // scratch-pose sampling followed by a second full-node blend. Evaluate straight into the
+        // live pose instead. This is especially important for hundreds of identical rigid props.
+        if (tracks.size() == 1) {
+            Track only = tracks.values().iterator().next();
+            if (only.weight >= 1.0f && only.mode == AnimationBlendMode.OVERRIDE
+                && only.mask.isAll() && only.source == null) {
+                // Preserve the public mutable-pose behavior: a fresh evaluation starts from bind
+                // pose, so direct edits to unanimated channels do not become sticky. The fast path
+                // still avoids scratch-pose sampling plus the second full-node blend.
+                pose.reset();
+                AnimationEvaluator.apply(only.clip, only.time, pose);
+                poseRevision++;
+                return;
+            }
+        }
+
         pose.reset();
         for (Track track : tracks.values()) {
-            if (track.weight <= 0.0f) {
-                continue;
-            }
+            if (track.weight <= 0.0f) continue;
             sample(track, scratch);
             for (int node = 0; node < pose.nodeCount(); node++) {
-                if (!track.mask.includes(node)) {
-                    continue;
-                }
+                if (!track.mask.includes(node)) continue;
                 if (track.mode == AnimationBlendMode.OVERRIDE) {
                     override(pose.node(node), scratch.node(node), track.weight);
                 } else {
@@ -367,6 +392,7 @@ public final class AnimationController {
                 }
             }
         }
+        poseRevision++;
     }
 
     private void sample(Track track, ModelPose output) {

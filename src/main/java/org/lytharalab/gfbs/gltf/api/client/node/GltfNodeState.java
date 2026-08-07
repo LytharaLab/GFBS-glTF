@@ -78,6 +78,11 @@ public final class GltfNodeState {
     }
 
     public float[] colorMultiplier() { return colorMultiplier.clone(); }
+    public float colorRed() { return colorMultiplier[0]; }
+    public float colorGreen() { return colorMultiplier[1]; }
+    public float colorBlue() { return colorMultiplier[2]; }
+    public GltfRenderOptions.LightMode lightModeOrNull() { return lightMode; }
+    public GltfRenderOptions.CullMode cullModeOrNull() { return cullMode; }
     public GltfNodeState colorMultiplier(float red, float green, float blue) {
         colorMultiplier[0] = nonNegative(red, "Red multiplier");
         colorMultiplier[1] = nonNegative(green, "Green multiplier");
@@ -208,18 +213,34 @@ public final class GltfNodeState {
     }
 
     float[] resolveLocalMatrix(NodePose pose) {
-        float[] resolved;
+        float[] resolved = new float[16];
+        resolveLocalMatrixInto(pose, resolved, new float[16]);
+        return resolved;
+    }
+
+    /** Allocation-free local transform resolution for the realtime world-matrix cache. */
+    void resolveLocalMatrixInto(NodePose pose, float[] output, float[] scratch) {
+        if (output.length < 16 || scratch.length < 16) {
+            throw new IllegalArgumentException("Transform scratch buffers require 16 values");
+        }
         if (localMatrix != null) {
-            resolved = localMatrix.clone();
+            System.arraycopy(localMatrix, 0, output, 0, 16);
         } else if (translation != null || rotation != null || scale != null) {
             float[] t = translation == null ? pose.translation() : translation;
             float[] r = rotation == null ? pose.rotation() : rotation;
             float[] s = scale == null ? pose.scale() : scale;
-            resolved = PoseTransforms.trsMatrix(t, r, s);
+            PoseTransforms.trsMatrixInto(t, r, s, output, 0);
+        } else if (definition().hasMatrix()) {
+            definition().copyMatrixTo(output);
         } else {
-            resolved = PoseTransforms.localMatrix(definition(), pose);
+            PoseTransforms.trsMatrixInto(
+                pose.translation(), pose.rotation(), pose.scale(), output, 0
+            );
         }
-        return postTransform == null ? resolved : PoseTransforms.multiply(resolved, postTransform);
+        if (postTransform != null) {
+            System.arraycopy(output, 0, scratch, 0, 16);
+            PoseTransforms.multiplyInto(scratch, 0, postTransform, 0, output, 0);
+        }
     }
 
     float[] resolveMorphWeights(NodePose pose, float[] meshDefaults) {

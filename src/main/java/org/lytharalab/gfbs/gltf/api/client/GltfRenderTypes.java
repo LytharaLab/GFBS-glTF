@@ -70,7 +70,8 @@ public final class GltfRenderTypes {
             RenderSystem.disableBlend();
             RenderSystem.defaultBlendFunc();
         });
-    private static final Map<String, RenderType> CACHE = new HashMap<>();
+    private static final Map<ResourceLocation, RenderType[]> STANDARD_CACHE = new HashMap<>();
+    private static final Map<String, RenderType> CUSTOM_CACHE = new HashMap<>();
     private static final Map<RenderType, Integer> ORDER = new IdentityHashMap<>();
 
     private GltfRenderTypes() {
@@ -149,29 +150,47 @@ public final class GltfRenderTypes {
                                        RenderStateShard.TransparencyStateShard transparency,
                                        int order, boolean writeDepth, VertexFormat.Mode mode) {
         Objects.requireNonNull(texture, "texture");
+        int slot = standardSlot(kind, cull);
+        RenderType[] cached = STANDARD_CACHE.computeIfAbsent(texture, ignored -> new RenderType[16]);
+        RenderType existing = cached[slot];
+        if (existing != null) return existing;
+
+        RenderType.CompositeState state = RenderType.CompositeState.builder()
+            .setShaderState(new RenderStateShard.ShaderStateShard(shader))
+            .setTextureState(new RenderStateShard.TextureStateShard(texture, false, false))
+            .setTransparencyState(transparency)
+            .setCullState(new RenderStateShard.CullStateShard(cull))
+            .setLightmapState(new RenderStateShard.LightmapStateShard(true))
+            .setOverlayState(new RenderStateShard.OverlayStateShard(true))
+            .setWriteMaskState(new RenderStateShard.WriteMaskStateShard(true, writeDepth))
+            .createCompositeState(true);
         String key = kind + ":" + texture + ":" + cull;
-        return CACHE.computeIfAbsent(key, ignored -> {
-            RenderType.CompositeState state = RenderType.CompositeState.builder()
-                .setShaderState(new RenderStateShard.ShaderStateShard(shader))
-                .setTextureState(new RenderStateShard.TextureStateShard(texture, false, false))
-                .setTransparencyState(transparency)
-                .setCullState(new RenderStateShard.CullStateShard(cull))
-                .setLightmapState(new RenderStateShard.LightmapStateShard(true))
-                .setOverlayState(new RenderStateShard.OverlayStateShard(true))
-                .setWriteMaskState(new RenderStateShard.WriteMaskStateShard(true, writeDepth))
-                .createCompositeState(true);
-            RenderType type = RenderType.create(
-                "gfbs_gltf_" + kind + "_" + Integer.toUnsignedString(key.hashCode()),
-                REQUIRED_FORMAT,
-                mode,
-                BUFFER_SIZE,
-                true,
-                kind.equals("translucent"),
-                state
-            );
-            ORDER.put(type, order);
-            return type;
-        });
+        RenderType type = RenderType.create(
+            "gfbs_gltf_" + kind + "_" + Integer.toUnsignedString(key.hashCode()),
+            REQUIRED_FORMAT,
+            mode,
+            BUFFER_SIZE,
+            true,
+            kind.equals("translucent"),
+            state
+        );
+        ORDER.put(type, order);
+        cached[slot] = type;
+        return type;
+    }
+
+    private static int standardSlot(String kind, boolean cull) {
+        int base = switch (kind) {
+            case "solid" -> 0;
+            case "cutout" -> 2;
+            case "translucent" -> 4;
+            case "lines" -> 6;
+            case "translucent_lines" -> 8;
+            case "emissive" -> 10;
+            case "emissive_lines" -> 12;
+            default -> throw new IllegalArgumentException("Unknown standard glTF RenderType: " + kind);
+        };
+        return base + (cull ? 1 : 0);
     }
 
     public static final class Builder {
@@ -239,7 +258,7 @@ public final class GltfRenderTypes {
         public RenderType build() {
             if (texture == null) throw new IllegalStateException("A texture is required");
             String key = "custom:" + name;
-            return CACHE.computeIfAbsent(key, ignored -> {
+            return CUSTOM_CACHE.computeIfAbsent(key, ignored -> {
                 RenderType.CompositeState state = RenderType.CompositeState.builder()
                     .setShaderState(new RenderStateShard.ShaderStateShard(shader))
                     .setTextureState(new RenderStateShard.TextureStateShard(texture, blur, mipmap))

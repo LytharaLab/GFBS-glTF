@@ -189,6 +189,11 @@ public final class GltfMaterial {
 
     public String name() { return name; }
     public float[] baseColor() { return baseColor.clone(); }
+    /** Allocation-free scalar accessors for render hot paths. */
+    public float baseColorRed() { return baseColor[0]; }
+    public float baseColorGreen() { return baseColor[1]; }
+    public float baseColorBlue() { return baseColor[2]; }
+    public float baseColorAlpha() { return baseColor[3]; }
     public int baseColorTexture() { return baseColorTexture.texture(); }
     public int baseColorTexCoord() { return baseColorTexture.texCoord(); }
     public GltfTextureInfo baseColorTextureInfo() { return baseColorTexture; }
@@ -206,6 +211,10 @@ public final class GltfMaterial {
     public GltfTextureInfo occlusionTextureInfo() { return occlusionTexture; }
     public float occlusionStrength() { return occlusionStrength; }
     public float[] emissive() { return emissive.clone(); }
+    /** Allocation-free scalar accessors for render hot paths. */
+    public float emissiveRed() { return emissive[0]; }
+    public float emissiveGreen() { return emissive[1]; }
+    public float emissiveBlue() { return emissive[2]; }
     public int emissiveTexture() { return emissiveTexture.texture(); }
     public int emissiveTexCoord() { return emissiveTexture.texCoord(); }
     public GltfTextureInfo emissiveTextureInfo() { return emissiveTexture; }

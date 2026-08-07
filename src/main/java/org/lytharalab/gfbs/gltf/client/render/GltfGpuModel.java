@@ -11,10 +11,15 @@ import org.lwjgl.opengl.GL30C;
 import org.lwjgl.stb.STBImage;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
+import org.lytharalab.gfbs.gltf.GFBSglTF;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
 import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
+import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
+import org.lytharalab.gfbs.gltf.api.model.GltfNode;
+import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfTexture;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveKey;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -26,14 +31,14 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Texture-only GPU cache. Geometry is fed to Minecraft's NEW_ENTITY pipeline, so GFBS no longer
- * carries a standalone PBR program or depends on Embeddium internals.
+ * Shared GPU cache for one immutable glTF asset. Textures and rigid geometry live here so every
+ * runtime instance reuses the same resident resources; dynamic skin/morph geometry falls back to
+ * the compatibility CPU pipeline.
  */
 final class GltfGpuModel {
     private static final AtomicLong NEXT_RUNTIME_ID = new AtomicLong();
     private static final int MAX_TEXTURE_DIMENSION = 8192;
     private static final long MAX_TOTAL_TEXTURE_PIXELS = 64L * 1024L * 1024L;
-
     final GltfAsset asset;
     final List<ResourceLocation> textures = new ArrayList<>();
     private final List<ResourceLocation> maskTextures = new ArrayList<>();
@@ -43,6 +48,7 @@ final class GltfGpuModel {
     private final Map<GltfMaterial, ResourceLocation> runtimeMaskTextures = new IdentityHashMap<>();
     private final Map<GltfMaterial, ResourceLocation> runtimeMaterialTextures = new IdentityHashMap<>();
     private final Map<GltfMaterial, GltfMaterialTexture> runtimeMaterialTextureObjects = new IdentityHashMap<>();
+    private final ScenePlan[] scenePlans;
     private final String runtimeId = Long.toUnsignedString(NEXT_RUNTIME_ID.incrementAndGet(), 36);
     private ResourceLocation whiteTexture;
     private boolean pbrUploaded;
@@ -52,6 +58,7 @@ final class GltfGpuModel {
     GltfGpuModel(GltfAsset asset) {
         RenderSystem.assertOnRenderThread();
         this.asset = asset;
+        this.scenePlans = compileScenePlans(asset);
         for (int index = 0; index < asset.materials().size(); index++) {
             originalMaterialIndices.put(asset.materials().get(index), index);
         }
@@ -69,6 +76,74 @@ final class GltfGpuModel {
             }
             throw failure;
         }
+    }
+
+    ScenePlan scenePlan(int scene) {
+        return scenePlans[scene];
+    }
+
+    GltfGpuPrimitive geometry(PrimitivePlan plan, GltfMaterial material,
+                              GltfGeometryPipeline.PassKind pass) {
+        RenderSystem.assertOnRenderThread();
+        boolean base = pass == GltfGeometryPipeline.PassKind.BASE;
+        Map<GltfMaterial, GltfGpuPrimitive> variants =
+            base ? plan.baseGeometry : plan.emissiveGeometry;
+        Map<GltfMaterial, Boolean> failed = base ? plan.failedBaseGeometry : plan.failedEmissiveGeometry;
+        GltfGpuPrimitive existing = variants.get(material);
+        if (existing != null) return existing;
+        if (failed.containsKey(material)) return null;
+
+        GltfGeometryPipeline.MaterialPass materialPass = base
+            ? GltfGeometryPipeline.MaterialPass.base(material, 1.0f, 1.0f, 1.0f)
+            : GltfGeometryPipeline.MaterialPass.emissiveGpu(material);
+        try {
+            GltfGpuPrimitive compiled = GltfGpuPrimitive.compile(
+                plan.primitive, material, materialPass
+            );
+            variants.put(material, compiled);
+            return compiled;
+        } catch (RuntimeException failure) {
+            failed.put(material, Boolean.TRUE);
+            GFBSglTF.LOGGER.warn(
+                "Falling back to streamed glTF geometry for {} node {} mesh {} primitive {} ({})",
+                asset.id(), plan.nodeIndex, plan.meshIndex, plan.primitiveIndex, pass, failure
+            );
+            return null;
+        }
+    }
+
+    private static ScenePlan[] compileScenePlans(GltfAsset asset) {
+        ScenePlan[] result = new ScenePlan[asset.scenes().size()];
+        for (int sceneIndex = 0; sceneIndex < result.length; sceneIndex++) {
+            List<NodePlan> nodes = new ArrayList<>();
+            for (int root : asset.scenes().get(sceneIndex).roots()) {
+                compileNodePlan(asset, root, nodes);
+            }
+            result[sceneIndex] = new ScenePlan(nodes.toArray(NodePlan[]::new));
+        }
+        return result;
+    }
+
+    private static void compileNodePlan(GltfAsset asset, int nodeIndex, List<NodePlan> output) {
+        GltfNode node = asset.nodes().get(nodeIndex);
+        List<PrimitivePlan> primitives = new ArrayList<>();
+        int[] meshIndices = node.meshes();
+        for (int meshIndex : meshIndices) {
+            GltfMesh mesh = asset.meshes().get(meshIndex);
+            for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
+                primitives.add(new PrimitivePlan(
+                    nodeIndex, node.name(), meshIndex, primitiveIndex, mesh,
+                    mesh.primitives().get(primitiveIndex),
+                    new GltfPrimitiveKey(nodeIndex, meshIndex, primitiveIndex)
+                ));
+            }
+        }
+        NodePlan plan = new NodePlan(
+            nodeIndex, node, primitives.toArray(PrimitivePlan[]::new)
+        );
+        output.add(plan);
+        for (int child : node.children()) compileNodePlan(asset, child, output);
+        plan.subtreeEndExclusive = output.size();
     }
 
     ResourceLocation materialTexture(GltfMaterial material, boolean shaderPackActive) {
@@ -373,7 +448,7 @@ final class GltfGpuModel {
     }
 
     private static void applyAlphaMask(NativeImage image, GltfMaterial material) {
-        float factorAlpha = material.baseColor()[3];
+        float factorAlpha = material.baseColorAlpha();
         for (int y = 0; y < image.getHeight(); y++) {
             for (int x = 0; x < image.getWidth(); x++) {
                 int source = image.getPixelRGBA(x, y);
@@ -487,6 +562,11 @@ final class GltfGpuModel {
         RenderSystem.assertOnRenderThread();
         if (deleted) return;
         deleted = true;
+        for (ScenePlan scene : scenePlans) {
+            for (NodePlan node : scene.nodes) {
+                for (PrimitivePlan primitive : node.primitives) primitive.closeGeometry();
+            }
+        }
         for (ResourceLocation texture : textures) {
             Minecraft.getInstance().getTextureManager().release(texture);
         }
@@ -534,6 +614,58 @@ final class GltfGpuModel {
     private static int blue(int rgba) { return rgba >>> 16 & 255; }
     private static int rgba(int red, int green, int blue, int alpha) {
         return red | green << 8 | blue << 16 | alpha << 24;
+    }
+
+    static final class ScenePlan {
+        final NodePlan[] nodes;
+        ScenePlan(NodePlan[] nodes) { this.nodes = nodes; }
+    }
+
+    static final class NodePlan {
+        final int nodeIndex;
+        final GltfNode node;
+        final PrimitivePlan[] primitives;
+        int subtreeEndExclusive;
+
+        NodePlan(int nodeIndex, GltfNode node, PrimitivePlan[] primitives) {
+            this.nodeIndex = nodeIndex;
+            this.node = node;
+            this.primitives = primitives;
+        }
+    }
+
+    static final class PrimitivePlan {
+        final int nodeIndex;
+        final String nodeName;
+        final int meshIndex;
+        final int primitiveIndex;
+        final GltfMesh mesh;
+        final GltfPrimitive primitive;
+        final GltfPrimitiveKey key;
+        final Map<GltfMaterial, GltfGpuPrimitive> baseGeometry = new IdentityHashMap<>();
+        final Map<GltfMaterial, GltfGpuPrimitive> emissiveGeometry = new IdentityHashMap<>();
+        final Map<GltfMaterial, Boolean> failedBaseGeometry = new IdentityHashMap<>();
+        final Map<GltfMaterial, Boolean> failedEmissiveGeometry = new IdentityHashMap<>();
+
+        PrimitivePlan(int nodeIndex, String nodeName, int meshIndex, int primitiveIndex,
+                      GltfMesh mesh, GltfPrimitive primitive, GltfPrimitiveKey key) {
+            this.nodeIndex = nodeIndex;
+            this.nodeName = nodeName;
+            this.meshIndex = meshIndex;
+            this.primitiveIndex = primitiveIndex;
+            this.mesh = mesh;
+            this.primitive = primitive;
+            this.key = key;
+        }
+
+        void closeGeometry() {
+            for (GltfGpuPrimitive buffer : baseGeometry.values()) buffer.close();
+            for (GltfGpuPrimitive buffer : emissiveGeometry.values()) buffer.close();
+            baseGeometry.clear();
+            emissiveGeometry.clear();
+            failedBaseGeometry.clear();
+            failedEmissiveGeometry.clear();
+        }
     }
 
     private record ImageInfo(int width, int height) {

@@ -51,6 +51,24 @@ class GltfVertexTransformsTest {
     }
 
     @Test
+    void zeroMorphPrepareStillReturnsWritableCopies() {
+        GltfPrimitive primitive = new GltfPrimitive(
+            PrimitiveMode.TRIANGLES, 0, 3,
+            new float[]{0, 0, 0, 1, 0, 0, 0, 1, 0},
+            new float[]{0, 0, 1, 0, 0, 1, 0, 0, 1},
+            null, null, null, null, null, null, new int[]{0, 1, 2}, List.of()
+        );
+
+        GltfVertexTransforms.PreparedGeometry prepared =
+            GltfVertexTransforms.prepare(primitive, null);
+        prepared.positions()[0] = 99.0f;
+        prepared.normals()[0] = 99.0f;
+
+        assertEquals(0.0f, primitive.positions()[0]);
+        assertEquals(0.0f, primitive.normals()[0]);
+    }
+
+    @Test
     void zeroSkinWeightsPreserveTheOriginalVertex() {
         float[] output = new float[6];
         GltfVertexTransforms.skinVertex(

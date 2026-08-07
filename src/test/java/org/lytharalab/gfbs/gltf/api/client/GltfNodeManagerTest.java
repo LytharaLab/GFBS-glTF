@@ -96,6 +96,23 @@ class GltfNodeManagerTest {
         assertEquals(1.0f, nodes.node(0).alpha());
     }
 
+    @Test
+    void cachedWorldMatricesStillObserveDirectPoseArrayEdits() {
+        GltfAsset asset = asset();
+        GltfNodeManager nodes = new GltfNodeManager(asset);
+        ModelPose pose = new ModelPose(asset);
+
+        float[] first = nodes.computeWorldMatricesView(pose, 0L);
+        assertEquals(0.0f, first[12]);
+
+        // NodePose arrays are intentionally mutable public API. The renderer cache must not make
+        // this historical usage silently stale.
+        pose.node(0).translation()[0] = 7.0f;
+        float[] second = nodes.computeWorldMatricesView(pose, 0L);
+        assertSame(first, second);
+        assertEquals(7.0f, second[12]);
+    }
+
     private static GltfAsset asset() {
         GltfMaterial normal = GltfMaterial.defaultMaterial();
         GltfMaterial blue = new GltfMaterial(
