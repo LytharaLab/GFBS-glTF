@@ -1,7 +1,9 @@
 package org.lytharalab.gfbs.gltf.client.render;
 
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
+import org.lytharalab.gfbs.gltf.api.model.GltfPrimitiveAccess;
 import org.lytharalab.gfbs.gltf.api.model.MorphTarget;
+import org.lytharalab.gfbs.gltf.api.model.MorphTargetAccess;
 
 /**
  * Shared CPU geometry transforms used by the immediate and baked-model render paths.
@@ -13,11 +15,24 @@ public final class GltfVertexTransforms {
     }
 
     public static PreparedGeometry prepare(GltfPrimitive primitive, float[] morphWeights) {
-        float[] positions = primitive.positions();
-        float[] normals = primitive.normals();
-        float[] tangents = primitive.tangents();
-        applyMorphs(primitive, morphWeights, positions, normals, tangents);
+        // This method is public and historically returned writable copies. Keep that ownership
+        // contract intact; the realtime renderer uses GltfGeometryPipeline for zero-copy access.
+        float[] positions = GltfPrimitiveAccess.positions(primitive).clone();
+        float[] sourceNormals = GltfPrimitiveAccess.normals(primitive);
+        float[] sourceTangents = GltfPrimitiveAccess.tangents(primitive);
+        float[] normals = sourceNormals == null ? null : sourceNormals.clone();
+        float[] tangents = sourceTangents == null ? null : sourceTangents.clone();
+        if (hasActiveMorph(primitive, morphWeights)) {
+            applyMorphs(primitive, morphWeights, positions, normals, tangents);
+        }
         return new PreparedGeometry(positions, normals, tangents);
+    }
+
+    static boolean hasActiveMorph(GltfPrimitive primitive, float[] weights) {
+        if (primitive.morphTargets().isEmpty() || weights == null) return false;
+        int count = Math.min(weights.length, primitive.morphTargets().size());
+        for (int i = 0; i < count; i++) if (weights[i] != 0.0f) return true;
+        return false;
     }
 
     public static void applyMorphs(GltfPrimitive primitive, float[] weights,
@@ -26,15 +41,25 @@ public final class GltfVertexTransforms {
             float weight = weights != null && targetIndex < weights.length ? weights[targetIndex] : 0.0f;
             if (weight == 0.0f) continue;
             MorphTarget target = primitive.morphTargets().get(targetIndex);
-            addWeighted(positions, target.positions(), weight);
-            addWeighted(normals, target.normals(), weight);
-            addWeightedTangent(tangents, target.tangents(), weight);
+            addWeighted(positions, MorphTargetAccess.positions(target), weight);
+            addWeighted(normals, MorphTargetAccess.normals(target), weight);
+            addWeightedTangent(tangents, MorphTargetAccess.tangents(target), weight);
         }
         normalizeTriples(normals, 3);
         normalizeTriples(tangents, 4);
     }
 
     public static float[] faceNormal(float[] positions, int a, int b, int c) {
+        float[] result = new float[3];
+        faceNormal(positions, a, b, c, result);
+        return result;
+    }
+
+    /** Allocation-free face-normal helper for render hot paths. */
+    public static void faceNormal(float[] positions, int a, int b, int c, float[] output) {
+        if (output == null || output.length < 3) {
+            throw new IllegalArgumentException("Normal output requires three values");
+        }
         int first = a * 3;
         int second = b * 3;
         int third = c * 3;
@@ -49,10 +74,13 @@ public final class GltfVertexTransforms {
         float z = abX * acY - abY * acX;
         double lengthSquared = (double) x * x + (double) y * y + (double) z * z;
         if (!Double.isFinite(lengthSquared) || lengthSquared <= 1.0e-16) {
-            return new float[]{0.0f, 1.0f, 0.0f};
+            output[0] = 0.0f; output[1] = 1.0f; output[2] = 0.0f;
+            return;
         }
         float inverseLength = (float) (1.0 / Math.sqrt(lengthSquared));
-        return new float[]{x * inverseLength, y * inverseLength, z * inverseLength};
+        output[0] = x * inverseLength;
+        output[1] = y * inverseLength;
+        output[2] = z * inverseLength;
     }
 
     public static void skinVertex(int vertex, float x, float y, float z,

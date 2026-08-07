@@ -17,6 +17,10 @@ public record MorphTarget(float[] positions, float[] normals, float[] tangents) 
     @Override public float[] normals() { return normals == null ? null : normals.clone(); }
     @Override public float[] tangents() { return tangents == null ? null : tangents.clone(); }
 
+    float[] positionsView() { return positions; }
+    float[] normalsView() { return normals; }
+    float[] tangentsView() { return tangents; }
+
     private static void requireFinite(float[] values, String label) {
         if (values == null) return;
         for (float value : values) {

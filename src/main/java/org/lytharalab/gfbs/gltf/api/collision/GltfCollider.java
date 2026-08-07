@@ -14,13 +14,15 @@ import org.lytharalab.gfbs.gltf.api.model.GltfBounds;
 import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
 import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
+import org.lytharalab.gfbs.gltf.api.model.GltfPrimitiveAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
+import org.lytharalab.gfbs.gltf.api.model.GltfSkinAccess;
 import org.lytharalab.gfbs.gltf.api.model.MorphTarget;
+import org.lytharalab.gfbs.gltf.api.model.MorphTargetAccess;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 import org.lytharalab.gfbs.gltf.collision.GltfCollisionManager;
 import org.lytharalab.gfbs.gltf.collision.GltfCollisionShape;
 import org.lytharalab.gfbs.gltf.collision.TriangleVoxelizerAccess;
-import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -130,7 +132,9 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
         }
         refreshSelection();
         ModelPose pose = instance.animations().pose();
-        float[] world = instance.nodes().computeWorldMatrices(pose);
+        float[] world = instance.nodes().computeWorldMatricesView(
+            pose, instance.animations().poseRevision()
+        );
         long currentSignature = computeSignature(world, pose);
         if (!dirty && currentSignature == signature) return;
         signature = currentSignature;
@@ -207,7 +211,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     }
 
     private float[] voxelizeLocal(GltfPrimitive primitive) {
-        float[] triangles = expandTriangles(primitive, primitive.positions());
+        float[] triangles = expandTriangles(primitive, GltfPrimitiveAccess.positions(primitive));
         return TriangleVoxelizerAccess.voxelize(
             triangles, options.precision(), options.maxVoxels(), options.solid(), 0.0f,
             options.maxBoxes()
@@ -220,14 +224,18 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
         GltfAsset asset = instance.asset();
         forEachPrimitive((nodeIndex, mesh, primitive) -> {
             if (!isTriangleMode(primitive.mode())) return;
-            float[] positions = primitive.positions();
-            float[] morphWeights = instance.nodes().resolveMorphWeights(nodeIndex, mesh, pose);
+            float[] positions = GltfPrimitiveAccess.positions(primitive).clone();
+            float[] morphWeights = instance.nodes().resolveMorphWeightsView(nodeIndex, mesh, pose);
             applyMorphs(primitive, morphWeights, positions);
             GltfNode node = asset.nodes().get(nodeIndex);
-            if (node.skin() >= 0 && primitive.joints() != null && primitive.weights() != null) {
+            int[] joints = GltfPrimitiveAccess.joints(primitive);
+            float[] weights = GltfPrimitiveAccess.weights(primitive);
+            if (node.skin() >= 0 && joints != null && weights != null) {
                 GltfSkin skin = asset.skins().get(node.skin());
-                float[] palette = PoseTransforms.computeSkinPalette(skin, nodeIndex, world);
-                skinPositions(positions, primitive.joints(), primitive.weights(), palette, skin.joints().length);
+                float[] palette = instance.nodes().computeSkinPaletteView(
+                    skin, nodeIndex, pose, instance.animations().poseRevision()
+                );
+                skinPositions(positions, joints, weights, palette, GltfSkinAccess.joints(skin).length);
             }
             float[] triangles = expandTriangles(primitive, positions);
             Matrix4f transform = nodeTransform(world, nodeIndex);
@@ -281,7 +289,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
         for (float value : world) result = result * 31 + Float.floatToIntBits(value);
         for (int node = 0; node < instance.asset().nodes().size(); node++) {
             for (int meshIndex : instance.asset().nodes().get(node).meshes()) {
-                float[] weights = instance.nodes().resolveMorphWeights(
+                float[] weights = instance.nodes().resolveMorphWeightsView(
                     node, instance.asset().meshes().get(meshIndex), pose
                 );
                 if (weights != null) {
@@ -334,7 +342,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     }
 
     private static float[] expandTriangles(GltfPrimitive primitive, float[] positions) {
-        int[] indices = primitive.indices();
+        int[] indices = GltfPrimitiveAccess.indices(primitive);
         if (indices == null) {
             indices = new int[primitive.vertexCount()];
             for (int i = 0; i < indices.length; i++) indices[i] = i;
@@ -382,7 +390,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
             float weight = weights != null && target < weights.length ? weights[target] : 0.0f;
             if (weight == 0.0f) continue;
             MorphTarget morph = primitive.morphTargets().get(target);
-            float[] delta = morph.positions();
+            float[] delta = MorphTargetAccess.positions(morph);
             if (delta == null) continue;
             for (int i = 0; i < positions.length; i++) positions[i] += delta[i] * weight;
         }

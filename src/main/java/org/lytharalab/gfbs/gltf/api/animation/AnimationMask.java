@@ -5,8 +5,16 @@ import java.util.Arrays;
 /** Immutable node mask used by an animation layer. */
 public final class AnimationMask {
     private final boolean[] nodes;
+    private final boolean all;
 
-    private AnimationMask(boolean[] nodes) { this.nodes = nodes; }
+    private AnimationMask(boolean[] nodes) {
+        this.nodes = nodes;
+        boolean complete = true;
+        for (boolean node : nodes) {
+            if (!node) { complete = false; break; }
+        }
+        this.all = complete;
+    }
 
     public static AnimationMask all(int nodeCount) {
         if (nodeCount < 0) throw new IllegalArgumentException("Node count must be non-negative");
@@ -27,4 +35,7 @@ public final class AnimationMask {
 
     public int nodeCount() { return nodes.length; }
     public boolean includes(int node) { return nodes[node]; }
+
+    /** Returns true when this mask includes every node. */
+    public boolean isAll() { return all; }
 }

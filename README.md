@@ -16,8 +16,8 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.3.0` |
-| Public API | `1.3` |
+| GFBS: glTF | `1.4.0` |
+| Public API | `1.4` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -54,6 +54,24 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Optional bounds, cached voxel, and current-pose precise collision.
 - Extensible model importer registry for third-party formats.
 - Defensive resource limits and namespace-local resource resolution.
+
+## Renderer performance in 1.4.0
+
+GFBS: glTF 1.4 replaces the old per-frame streamed path for ordinary rigid animated meshes with
+a resident-GPU path. Triangle geometry without active skinning or morph deformation is compiled
+once into a shared `VertexBuffer` owned by the immutable asset and reused by every `GltfInstance`.
+Node animation changes only the draw matrix; packed light, overlay, tint, alpha, and emissive
+strength remain per draw and do not duplicate the resident geometry.
+
+The 1.4 renderer also removes the former 1-to-16 full-mesh emissive repetition, uses one emissive
+draw, caches world matrices and skin palettes, eliminates defensive array copies from internal hot
+paths, reuses immediate buffers, and performs allocation-free primitive bounds transforms for
+culling. Existing defensive-copy public model getters retain their original ownership semantics.
+
+Skinning, active morph targets, translucent materials, and custom RenderTypes retain a compatibility
+streamed path. That fallback is also substantially cheaper than 1.3 because it uses internal
+read-only primitive views and only copies vertex arrays when deformation actually needs writable
+data. See [Performance architecture](docs/PERFORMANCE.md) for fast-path rules and profiling notes.
 
 ## Installation
 

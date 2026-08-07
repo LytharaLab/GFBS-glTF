@@ -6,6 +6,9 @@ import org.lytharalab.gfbs.gltf.api.client.material.GltfMaterialVariant;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
+import org.lytharalab.gfbs.gltf.api.model.GltfMeshAccess;
+import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
+import org.lytharalab.gfbs.gltf.api.model.GltfSkinAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
@@ -40,6 +43,18 @@ public final class GltfNodeManager {
     private final Map<String, List<Integer>> materialsByName = new LinkedHashMap<>();
     private final Map<String, GltfMaterialVariant> variants = new LinkedHashMap<>();
     private final String[] paths;
+    private final float[] worldMatrices;
+    private final byte[] worldState;
+    private final int[] worldChain;
+    private final float[] worldLocalScratch = new float[16];
+    private final float[] worldMultiplyScratch = new float[16];
+    private final float[][] skinPalettes;
+    private final long[] skinPaletteWorldGenerations;
+    private ModelPose cachedWorldPose;
+    private long cachedWorldPoseRevision = Long.MIN_VALUE;
+    private long cachedWorldPoseSignature = Long.MIN_VALUE;
+    private long cachedWorldNodeRevision = Long.MIN_VALUE;
+    private long worldGeneration;
     private long revision;
     private long collisionRevision;
 
@@ -47,6 +62,12 @@ public final class GltfNodeManager {
         this.asset = Objects.requireNonNull(asset, "asset");
         nodes = new GltfNodeState[asset.nodes().size()];
         paths = new String[nodes.length];
+        worldMatrices = new float[Math.multiplyExact(nodes.length, 16)];
+        worldState = new byte[nodes.length];
+        worldChain = new int[nodes.length];
+        skinPalettes = new float[nodes.length][];
+        skinPaletteWorldGenerations = new long[nodes.length];
+        Arrays.fill(skinPaletteWorldGenerations, Long.MIN_VALUE);
 
         for (int index = 0; index < asset.materials().size(); index++) {
             materialsByName.computeIfAbsent(asset.materials().get(index).name(), ignored -> new ArrayList<>())
@@ -220,28 +241,96 @@ public final class GltfNodeManager {
 
     /** Computes hierarchy-correct world transforms including all runtime node overrides. */
     public float[] computeWorldMatrices(ModelPose pose) {
+        // Preserve the original public ownership contract: callers receive their own array.
+        recomputeWorldMatrices(pose);
+        return worldMatrices.clone();
+    }
+
+    /**
+     * Allocation-free, read-only world matrix view for renderer/collider hot paths. The returned
+     * array belongs to this instance and is invalidated in-place when pose/node revisions change.
+     */
+    public float[] computeWorldMatricesView(ModelPose pose, long poseRevision) {
         Objects.requireNonNull(pose, "pose");
-        if (pose.asset() != asset) throw new IllegalArgumentException("Pose belongs to a different asset");
-        float[] result = new float[Math.multiplyExact(nodes.length, 16)];
-        byte[] state = new byte[nodes.length];
-        int[] chain = new int[nodes.length];
+        if (pose.asset() != asset) {
+            throw new IllegalArgumentException("Pose belongs to a different asset");
+        }
+        boolean metadataDirty = cachedWorldPose != pose
+            || cachedWorldPoseRevision != poseRevision
+            || cachedWorldNodeRevision != revision;
+        if (metadataDirty) {
+            recomputeWorldMatrices(pose);
+            cachedWorldPose = pose;
+            cachedWorldPoseRevision = poseRevision;
+            cachedWorldNodeRevision = revision;
+        } else {
+            // NodePose intentionally exposes writable component arrays. Preserve that historical
+            // API behavior by detecting direct edits even when AnimationController did not bump
+            // its managed pose revision. This scan is still far cheaper than rebuilding matrices.
+            long signature = poseSignature(pose);
+            if (signature != cachedWorldPoseSignature) recomputeWorldMatrices(pose);
+        }
+        return worldMatrices;
+    }
+
+    private void recomputeWorldMatrices(ModelPose pose) {
+        Objects.requireNonNull(pose, "pose");
+        if (pose.asset() != asset) {
+            throw new IllegalArgumentException("Pose belongs to a different asset");
+        }
+        Arrays.fill(worldState, (byte) 0);
         for (int start = 0; start < nodes.length; start++) {
-            if (state[start] == 2) continue;
+            if (worldState[start] == 2) continue;
             int length = 0;
             int current = start;
-            while (current >= 0 && state[current] != 2) {
-                if (state[current] == 1) throw new IllegalArgumentException("Cycle in glTF node hierarchy");
-                state[current] = 1;
-                chain[length++] = current;
+            while (current >= 0 && worldState[current] != 2) {
+                if (worldState[current] == 1) {
+                    throw new IllegalArgumentException("Cycle in glTF node hierarchy");
+                }
+                worldState[current] = 1;
+                worldChain[length++] = current;
                 current = asset.nodes().get(current).parent();
             }
             for (int position = length - 1; position >= 0; position--) {
-                int nodeIndex = chain[position];
-                float[] world = nodes[nodeIndex].resolveLocalMatrix(pose.node(nodeIndex));
+                int nodeIndex = worldChain[position];
+                nodes[nodeIndex].resolveLocalMatrixInto(
+                    pose.node(nodeIndex), worldLocalScratch, worldMultiplyScratch
+                );
                 int parent = asset.nodes().get(nodeIndex).parent();
-                if (parent >= 0) world = PoseTransforms.multiply(slice(result, parent), world);
-                System.arraycopy(world, 0, result, nodeIndex * 16, 16);
-                state[nodeIndex] = 2;
+                int outputOffset = nodeIndex * 16;
+                if (parent < 0) {
+                    System.arraycopy(worldLocalScratch, 0, worldMatrices, outputOffset, 16);
+                } else {
+                    PoseTransforms.multiplyInto(
+                        worldMatrices, parent * 16, worldLocalScratch, 0,
+                        worldMatrices, outputOffset
+                    );
+                }
+                worldState[nodeIndex] = 2;
+            }
+        }
+        cachedWorldPoseSignature = poseSignature(pose);
+        worldGeneration++;
+    }
+
+    private static long poseSignature(ModelPose pose) {
+        long result = 0xcbf29ce484222325L;
+        for (int node = 0; node < pose.nodeCount(); node++) {
+            var value = pose.node(node);
+            for (float component : value.translation()) {
+                result = (result ^ Float.floatToRawIntBits(component)) * 0x100000001b3L;
+            }
+            for (float component : value.rotation()) {
+                result = (result ^ Float.floatToRawIntBits(component)) * 0x100000001b3L;
+            }
+            for (float component : value.scale()) {
+                result = (result ^ Float.floatToRawIntBits(component)) * 0x100000001b3L;
+            }
+            float[] weights = value.weights();
+            if (weights != null) {
+                for (float component : weights) {
+                    result = (result ^ Float.floatToRawIntBits(component)) * 0x100000001b3L;
+                }
             }
         }
         return result;
@@ -249,13 +338,40 @@ public final class GltfNodeManager {
 
     /** Returns the effective morph weights for rendering/collision, or null when absent. */
     public float[] resolveMorphWeights(int nodeIndex, GltfMesh mesh, ModelPose pose) {
+        float[] weights = resolveMorphWeightsView(nodeIndex, mesh, pose);
+        return weights == null ? null : weights.clone();
+    }
+
+    /** Allocation-free read-only morph-weight view for renderer/collider hot paths. */
+    public float[] resolveMorphWeightsView(int nodeIndex, GltfMesh mesh, ModelPose pose) {
         node(nodeIndex);
         Objects.requireNonNull(mesh, "mesh");
         Objects.requireNonNull(pose, "pose");
-        float[] weights = nodes[nodeIndex].resolveMorphWeights(
-            pose.node(nodeIndex), mesh.defaultMorphWeights()
-        );
-        return weights == null ? null : weights.clone();
+        float[] defaults = GltfMeshAccess.defaultMorphWeights(mesh);
+        return nodes[nodeIndex].resolveMorphWeights(pose.node(nodeIndex), defaults);
+    }
+
+    /**
+     * Allocation-free cached skin palette for a mesh node. The returned array is owned by this
+     * instance and must be treated as read-only.
+     */
+    public float[] computeSkinPaletteView(GltfSkin skin, int meshNode, ModelPose pose,
+                                          long poseRevision) {
+        node(meshNode);
+        Objects.requireNonNull(skin, "skin");
+        computeWorldMatricesView(pose, poseRevision);
+        int required = Math.multiplyExact(GltfSkinAccess.joints(skin).length, 16);
+        float[] palette = skinPalettes[meshNode];
+        if (palette == null || palette.length != required) {
+            palette = new float[required];
+            skinPalettes[meshNode] = palette;
+            skinPaletteWorldGenerations[meshNode] = Long.MIN_VALUE;
+        }
+        if (skinPaletteWorldGenerations[meshNode] != worldGeneration) {
+            PoseTransforms.computeSkinPaletteInto(skin, meshNode, worldMatrices, palette);
+            skinPaletteWorldGenerations[meshNode] = worldGeneration;
+        }
+        return palette;
     }
 
     public GltfNodeManager resetStates() {
