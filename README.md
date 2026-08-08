@@ -16,7 +16,7 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.4.0` |
+| GFBS: glTF | `1.4.1` |
 | Public API | `1.4` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
@@ -67,6 +67,11 @@ The 1.4 renderer also removes the former 1-to-16 full-mesh emissive repetition, 
 draw, caches world matrices and skin palettes, eliminates defensive array copies from internal hot
 paths, reuses immediate buffers, and performs allocation-free primitive bounds transforms for
 culling. Existing defensive-copy public model getters retain their original ownership semantics.
+
+Version 1.4.1 preserves this resident-GPU path on MobileGlues by supplying packed light and overlay
+through the GLES-compatible four-component integer vertex-attribute entry point. Its values are
+identical to desktop OpenGL's two-component call, including the implicit zero/one trailing
+components; no renderer detection or streamed-geometry fallback is required.
 
 Skinning, active morph targets, translucent materials, and custom RenderTypes retain a compatibility
 streamed path. That fallback is also substantially cheaper than 1.3 because it uses internal
