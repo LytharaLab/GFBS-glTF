@@ -136,14 +136,10 @@ final class GltfGpuPrimitive implements AutoCloseable {
             if (shader == null) return;
             buffer.bind();
             if (OVERLAY_ATTRIBUTE >= 0) {
-                GL30C.glVertexAttribI2i(
-                    OVERLAY_ATTRIBUTE, packedOverlay & 0xffff, packedOverlay >>> 16 & 0xffff
-                );
+                setIntegerVec2(OVERLAY_ATTRIBUTE, packedOverlay);
             }
             if (LIGHT_ATTRIBUTE >= 0) {
-                GL30C.glVertexAttribI2i(
-                    LIGHT_ATTRIBUTE, packedLight & 0xffff, packedLight >>> 16 & 0xffff
-                );
+                setIntegerVec2(LIGHT_ATTRIBUTE, packedLight);
             }
             // Streamed Minecraft vertices are first transformed by the caller PoseStack and are
             // then multiplied by RenderSystem's global ModelViewMat when the batch is flushed.
@@ -172,6 +168,26 @@ final class GltfGpuPrimitive implements AutoCloseable {
     public void close() {
         RenderSystem.assertOnRenderThread();
         buffer.close();
+    }
+
+    /**
+     * Supplies the two integer components used by Minecraft's UV1/UV2 attributes.
+     *
+     * <p>Desktop OpenGL defines the missing components of {@code glVertexAttribI2i} as
+     * {@code (0, 1)}. Use the equivalent four-component entry point explicitly because GLES 3
+     * exposes only the four-component integer constant setters. MobileGlues consequently maps
+     * {@code glVertexAttribI4i} to GLES while its smaller signed-arity desktop shims may be
+     * unavailable. Keeping this on the resident VAO path preserves per-instance light/overlay
+     * values without falling back to streamed geometry.</p>
+     */
+    private static void setIntegerVec2(int attribute, int packedValue) {
+        GL30C.glVertexAttribI4i(
+            attribute,
+            packedValue & 0xffff,
+            packedValue >>> 16 & 0xffff,
+            0,
+            1
+        );
     }
 
     private static final class DrawScratch {
