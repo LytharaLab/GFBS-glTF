@@ -4,6 +4,11 @@ A production-oriented glTF, GLB, and OBJ runtime for Minecraft Forge 1.20.1.
 
 GFBS: glTF loads animated models from Minecraft resources and exposes a reusable Java API for rendering, animation, synchronization, visibility control, custom importers, RenderType selection, culling, and optional voxel collision. It is the model runtime used by GFBS: Main, but it is designed to be integrated by other mods without depending on GFBS-specific content.
 
+---
+#### Team maintaining this project: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
+#### 维护此项目的团队: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
+---
+
 ## Repository
 
 - [Source code](https://github.com/LytharaLab/GFBS-glTF)
