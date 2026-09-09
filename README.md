@@ -2,7 +2,7 @@
 
 A production-oriented glTF, GLB, and OBJ runtime for Minecraft Forge 1.20.1.
 
-GFBS: glTF loads animated models from Minecraft resources and exposes a reusable Java API for rendering, animation, synchronization, visibility control, custom importers, RenderType selection, culling, and optional voxel collision. It is the model runtime used by GFBS: Main, but it is designed to be integrated by other mods without depending on GFBS-specific content.
+GFBS: glTF loads animated models from Minecraft resources and exposes a reusable Java API for rendering, animation, synchronization, visibility control, custom importers, RenderType selection, culling, optional voxel collision, and dependency-aware plugins. It is the model runtime used by GFBS: Main, but it is designed to be integrated by other mods without depending on GFBS-specific content.
 
 ---
 #### Team maintaining this project: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
@@ -16,13 +16,15 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 - [Issue tracker](https://github.com/LytharaLab/GFBS-glTF/issues)
 - [Pull requests](https://github.com/LytharaLab/GFBS-glTF/pulls)
 - [1.x API guide](docs/1.x-API.md)
+- [Plugin development guide](docs/PLUGINS.md)
+- [1.5 migration guide](docs/MIGRATING-1.5.md)
 
 ## Status and compatibility
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.4.1` |
-| Public API | `1.4` |
+| GFBS: glTF | `1.5.0` |
+| Public API | `1.5` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -58,7 +60,27 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Oculus/Iris shadow-map rendering with a dedicated depth-writing caster path.
 - Optional bounds, cached voxel, and current-pose precise collision.
 - Extensible model importer registry for third-party formats.
+- Dependency-aware plugin host with multiple plugins per Forge mod, direct and IMC registration,
+  deterministic ordering, lifecycle rollback, diagnostics, and runtime disable support.
+- Type-safe custom extension points, ordered asset processors, client resource-reload hooks, and
+  quarantined render hooks with custom passes that reuse GFBS skinning, morphing, culling, and
+  resident GPU geometry.
 - Defensive resource limits and namespace-local resource resolution.
+
+## Plugin system in 1.5.0
+
+Version 1.5 turns extension support into a first-class subsystem. A plugin has an ID, version,
+owning Forge mod, dependency list, lifecycle, and any number of typed extensions. One Forge mod can
+own multiple plugins, while a one-purpose plugin can still ship as its own normal mod JAR.
+
+Plugins can currently integrate at the model-import, post-import asset-processing, client resource
+reload, and staged rendering boundaries. They may also define new typed extension points for other
+plugins. Render extensions can add scene-wide passes before, between, or after the built-in passes,
+or suppress and replace a built-in pass. Custom passes receive resolved model/material/part state
+and use the existing skin, morph, visibility, culling, lighting, and resident-geometry machinery.
+
+See [Plugin development](docs/PLUGINS.md) for registration, dependencies, lifecycle rules, custom
+extension points, and a non-invasive glow-pass example.
 
 ## Renderer performance in 1.4.0
 

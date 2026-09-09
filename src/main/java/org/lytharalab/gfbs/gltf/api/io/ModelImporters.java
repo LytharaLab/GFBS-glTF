@@ -2,6 +2,11 @@ package org.lytharalab.gfbs.gltf.api.io;
 
 import net.minecraft.resources.ResourceLocation;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
+import org.lytharalab.gfbs.gltf.api.plugin.GltfExtensionEntry;
+import org.lytharalab.gfbs.gltf.api.plugin.GltfExtensionPoints;
+import org.lytharalab.gfbs.gltf.api.plugin.GltfPlugins;
+import org.lytharalab.gfbs.gltf.api.plugin.io.GltfAssetProcessingContext;
+import org.lytharalab.gfbs.gltf.api.plugin.io.GltfAssetProcessor;
 import org.lytharalab.gfbs.gltf.core.io.GltfAssetImporter;
 import org.lytharalab.gfbs.gltf.core.io.ObjAssetImporter;
 
@@ -64,7 +69,32 @@ public final class ModelImporters {
     public static GltfAsset load(ResourceLocation location, GltfResolver resolver) throws IOException {
         ModelImporter importer = find(location).orElseThrow(() ->
             new IOException("No model importer is registered for " + location));
-        return importer.load(location, resolver);
+        GltfAsset asset = Objects.requireNonNull(
+            importer.load(location, resolver), "Importer returned null for " + location
+        );
+        GltfAssetProcessingContext context = new GltfAssetProcessingContext(
+            location, resolver, importer
+        );
+        for (GltfExtensionEntry<GltfAssetProcessor> entry
+            : GltfPlugins.extensionEntries(GltfExtensionPoints.ASSET_PROCESSORS)) {
+            try {
+                asset = Objects.requireNonNull(
+                    entry.extension().process(asset, context),
+                    "Asset processor " + entry.pluginId() + " returned null for " + location
+                );
+            } catch (IOException exception) {
+                throw new IOException(
+                    "Asset processor from plugin " + entry.pluginId() + " failed for " + location,
+                    exception
+                );
+            } catch (RuntimeException exception) {
+                throw new IOException(
+                    "Asset processor from plugin " + entry.pluginId() + " failed for " + location,
+                    exception
+                );
+            }
+        }
+        return asset;
     }
 
     public static boolean supports(ResourceLocation location) {
