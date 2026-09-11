@@ -38,11 +38,14 @@ public final class ClientGltfModels implements GltfModelManager, ResourceManager
     }
 
     public void reload(ResourceManager manager) {
-        this.resources = Objects.requireNonNull(manager, "manager");
+        manager = Objects.requireNonNull(manager, "manager");
+        GltfClientPluginHooks.beforeReload(manager);
+        this.resources = manager;
         generation.incrementAndGet();
         assets.values().forEach(entry -> entry.future().cancel(false));
         assets.clear();
         GltfGpuCache.getInstance().clear();
+        GltfClientPluginHooks.afterReload(manager);
     }
 
     @Override

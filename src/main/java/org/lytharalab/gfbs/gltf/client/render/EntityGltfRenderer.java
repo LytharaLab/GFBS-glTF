@@ -17,6 +17,14 @@ import org.lytharalab.gfbs.gltf.api.client.GltfRenderContext;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderOptions;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderPart;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderTypes;
+import org.lytharalab.gfbs.gltf.api.client.plugin.ClientGltfExtensionPoints;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfBuiltInRenderPass;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfCustomRenderPass;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfPrimitiveRenderContext;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfRenderExtension;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfRenderLayer;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfRenderStage;
+import org.lytharalab.gfbs.gltf.api.client.plugin.GltfVertexSource;
 import org.lytharalab.gfbs.gltf.api.client.node.GltfNodeState;
 import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveState;
 import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
@@ -26,7 +34,11 @@ import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitiveAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkinAccess;
+import org.lytharalab.gfbs.gltf.api.plugin.GltfExtensionEntry;
+import org.lytharalab.gfbs.gltf.api.plugin.GltfPlugins;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -40,6 +52,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class EntityGltfRenderer {
     private static final Set<RenderType> WARNED_TYPES = ConcurrentHashMap.newKeySet();
+    private static final Set<GltfRenderExtension> QUARANTINED_EXTENSIONS =
+        Collections.newSetFromMap(new ConcurrentHashMap<>());
     private static final ThreadLocal<RenderScratch> SCRATCH =
         ThreadLocal.withInitial(RenderScratch::new);
     private static final ThreadLocal<ImmediateBuffers> IMMEDIATE =
@@ -90,20 +104,93 @@ public final class EntityGltfRenderer {
             && context != null && context.projectionView() != null;
         if (useOcclusion) occlusion.beginFrame();
 
-        renderPass(
-            instance, gpu, scene, buffers, options, context, shaderPack, shadowPass,
-            false, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion
-        );
-        if (!shadowPass) {
-            renderPass(
-                instance, gpu, scene, buffers, options, context, shaderPack, false,
-                true, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion
+        List<GltfExtensionEntry<GltfRenderExtension>> extensions =
+            GltfPlugins.extensionEntries(ClientGltfExtensionPoints.RENDER_EXTENSIONS);
+        PluginRenderFrame pluginFrame = null;
+        if (!extensions.isEmpty()) {
+            pluginFrame = new PluginRenderFrame(
+                instance, buffers, packedLight, packedOverlay, context, shadowPass, shaderPack,
+                base, pass -> renderCustomPass(
+                    instance, gpu, scene, buffers, options, context, shaderPack, shadowPass,
+                    pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion, pass
+                ), () -> flush(buffers)
             );
+        }
+
+        try {
+            if (pluginFrame != null) {
+                invokeExtensions(
+                    extensions, GltfRenderStage.BEFORE_BUILTIN_PASSES, pluginFrame
+                );
+            }
+            if (shadowPass) {
+                if (pluginFrame == null || !pluginFrame.isSuppressed(GltfBuiltInRenderPass.SHADOW)) {
+                    renderPass(
+                        instance, gpu, scene, buffers, options, context, shaderPack, true,
+                        false, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion
+                    );
+                }
+                if (pluginFrame != null) {
+                    invokeExtensions(extensions, GltfRenderStage.AFTER_SHADOW_PASS, pluginFrame);
+                }
+            } else {
+                if (pluginFrame == null || !pluginFrame.isSuppressed(GltfBuiltInRenderPass.BASE)) {
+                    renderPass(
+                        instance, gpu, scene, buffers, options, context, shaderPack, false,
+                        false, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion
+                    );
+                }
+                if (pluginFrame != null) {
+                    invokeExtensions(extensions, GltfRenderStage.AFTER_BASE_PASS, pluginFrame);
+                }
+                if (pluginFrame == null || !pluginFrame.isSuppressed(GltfBuiltInRenderPass.EMISSIVE)) {
+                    renderPass(
+                        instance, gpu, scene, buffers, options, context, shaderPack, false,
+                        true, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion
+                    );
+                }
+                if (pluginFrame != null) {
+                    invokeExtensions(extensions, GltfRenderStage.AFTER_EMISSIVE_PASS, pluginFrame);
+                }
+            }
+
+            if (pluginFrame != null) {
+                invokeExtensions(extensions, GltfRenderStage.AFTER_RENDER, pluginFrame);
+            }
+        } finally {
+            if (pluginFrame != null) pluginFrame.close();
         }
 
         if (useOcclusion) issueOcclusionQueries(
             instance, scene, options, context, world, base, occlusion
         );
+    }
+
+    private static void invokeExtensions(
+        List<GltfExtensionEntry<GltfRenderExtension>> extensions,
+        GltfRenderStage stage,
+        PluginRenderFrame frame
+    ) {
+        frame.stage(stage);
+        for (GltfExtensionEntry<GltfRenderExtension> entry : extensions) {
+            GltfRenderExtension extension = entry.extension();
+            if (QUARANTINED_EXTENSIONS.contains(extension)) continue;
+            try {
+                extension.render(stage, frame);
+            } catch (Throwable failure) {
+                QUARANTINED_EXTENSIONS.add(extension);
+                GFBSglTF.LOGGER.error(
+                    "Quarantined render extension from plugin {} after {} hook failed",
+                    entry.pluginId(), stage, failure
+                );
+            }
+        }
+    }
+
+    private static boolean flush(MultiBufferSource buffers) {
+        if (!(buffers instanceof MultiBufferSource.BufferSource source)) return false;
+        source.endBatch();
+        return true;
     }
 
     private static void renderPass(
@@ -270,6 +357,192 @@ public final class EntityGltfRenderer {
                     buffers.getBuffer(renderType), primitive, material, materialPass,
                     scratch.model, scratch.normal, skin, jointCount, morphWeights,
                     light, packedOverlay, alpha
+                );
+            }
+        }
+    }
+
+    private static void renderCustomPass(
+        GltfInstance instance,
+        GltfGpuModel gpu,
+        GltfGpuModel.ScenePlan scene,
+        MultiBufferSource buffers,
+        GltfRenderOptions options,
+        GltfRenderContext context,
+        boolean shaderPack,
+        boolean shadowPass,
+        ModelPose pose,
+        float[] world,
+        Matrix4f base,
+        int packedLight,
+        int packedOverlay,
+        boolean useOcclusion,
+        GltfOcclusionCuller occlusion,
+        GltfCustomRenderPass customPass
+    ) {
+        RenderScratch scratch = SCRATCH.get();
+        GltfGpuModel.NodePlan[] nodes = scene.nodes;
+        for (int planIndex = 0; planIndex < nodes.length; planIndex++) {
+            GltfGpuModel.NodePlan nodePlan = nodes[planIndex];
+            int nodeIndex = nodePlan.nodeIndex;
+            GltfNodeState nodeState = instance.nodes().node(nodeIndex);
+            if (!nodeState.subtreeVisible() || instance.collision().isNodeHidden(nodeIndex)) {
+                planIndex = nodePlan.subtreeEndExclusive - 1;
+                continue;
+            }
+            if (!nodeState.selfVisible()) continue;
+            if (shadowPass && !nodeState.castShadows()) continue;
+
+            scratch.world.set(world, nodeIndex * 16);
+            scratch.model.set(base).mul(scratch.world);
+            boolean normalReady = false;
+            float[] skin = null;
+            int jointCount = 0;
+            boolean skinReady = false;
+
+            for (GltfGpuModel.PrimitivePlan primitivePlan : nodePlan.primitives) {
+                GltfPrimitive primitive = primitivePlan.primitive;
+                GltfPrimitiveState primitiveState = instance.nodes().primitive(primitivePlan.key);
+                if (!primitiveState.visible()) continue;
+                if (shadowPass && (!GltfGeometryPipeline.isTriangleMode(primitive.mode())
+                    || !primitiveState.castShadows())) continue;
+
+                float[] morphWeights = primitive.morphTargets().isEmpty() ? null
+                    : instance.nodes().resolveMorphWeightsView(nodeIndex, primitivePlan.mesh, pose);
+                boolean activeMorph = GltfVertexTransforms.hasActiveMorph(primitive, morphWeights);
+                boolean skinnedGeometry = nodePlan.node.skin() >= 0
+                    && GltfPrimitiveAccess.joints(primitive) != null
+                    && GltfPrimitiveAccess.weights(primitive) != null;
+                boolean dynamicGeometry = activeMorph || skinnedGeometry;
+                GltfMaterial material = primitiveState.effectiveMaterial();
+                GltfRenderPart part = part(primitivePlan, primitiveState);
+
+                if (options.hasPartFilterOverride() && !options.partFilter().test(part)) continue;
+                if (!shadowPass && !GltfPrimitiveCuller.isVisible(
+                    primitive, scratch.model, context, options, dynamicGeometry
+                )) continue;
+                if (useOcclusion && !dynamicGeometry) {
+                    GltfOcclusionCuller.QueryKey queryKey = new GltfOcclusionCuller.QueryKey(
+                        instance.id(), nodeIndex, primitivePlan.meshIndex,
+                        primitivePlan.primitiveIndex
+                    );
+                    if (!occlusion.wasVisible(queryKey)) continue;
+                }
+
+                GltfRenderOptions.CullMode cullMode = resolveCullMode(
+                    options, nodeState, primitiveState
+                );
+                float red = nodeState.colorRed() * primitiveState.colorRed();
+                float green = nodeState.colorGreen() * primitiveState.colorGreen();
+                float blue = nodeState.colorBlue() * primitiveState.colorBlue();
+                float alpha = options.alpha() * nodeState.alpha() * primitiveState.alpha();
+                GltfRenderOptions.LightMode lightMode = resolveLightMode(
+                    options, nodeState, primitiveState
+                );
+                int inheritedLight = shadowPass
+                    || lightMode == GltfRenderOptions.LightMode.FULLBRIGHT || material.unlit()
+                    ? LightTexture.FULL_BRIGHT : packedLight;
+
+                ResourceLocation baseTexture = gpu.materialTexture(material, shaderPack);
+                ResourceLocation emissionTexture = gpu.emissiveTexture(material);
+                GltfPrimitiveRenderContext primitiveContext = new GltfPrimitiveRenderContext(
+                    instance, context, part, primitive, material, baseTexture, emissionTexture,
+                    scratch.model, shaderPack, shadowPass,
+                    GltfGeometryPipeline.isTriangleMode(primitive.mode()), dynamicGeometry,
+                    cull(cullMode, material), inheritedLight, packedOverlay,
+                    red, green, blue, alpha
+                );
+
+                GltfRenderLayer layer;
+                try {
+                    layer = customPass.layer(primitiveContext);
+                } catch (Exception failure) {
+                    throw new IllegalStateException(
+                        "Custom glTF render pass " + customPass.id() + " failed for " + part,
+                        failure
+                    );
+                }
+                if (layer == null) continue;
+
+                RenderType renderType = layer.renderType();
+                boolean compatible = GltfRenderTypes.isCompatible(renderType)
+                    && modeCompatible(renderType.mode(), primitive.mode());
+                if (options.validateRenderTypeFormat() && !compatible) {
+                    if (WARNED_TYPES.add(renderType)) {
+                        GFBSglTF.LOGGER.warn(
+                            "Ignoring incompatible RenderType {} from custom pass {} for {}; "
+                                + "NEW_ENTITY and a compatible draw mode are required",
+                            renderType, customPass.id(), part
+                        );
+                    }
+                    continue;
+                }
+
+                int light = switch (layer.lightMode()) {
+                    case INHERIT -> inheritedLight;
+                    case FULL_BRIGHT -> LightTexture.FULL_BRIGHT;
+                    case CUSTOM -> layer.customPackedLight();
+                };
+                float layerRed = red * layer.red();
+                float layerGreen = green * layer.green();
+                float layerBlue = blue * layer.blue();
+                float layerAlpha = alpha * layer.alpha();
+                GltfGeometryPipeline.PassKind passKind =
+                    layer.vertexSource() == GltfVertexSource.EMISSIVE
+                        ? GltfGeometryPipeline.PassKind.EMISSIVE
+                        : GltfGeometryPipeline.PassKind.BASE;
+                boolean rigidFast = layer.residentGeometry() && !dynamicGeometry
+                    && GltfGeometryPipeline.isTriangleMode(primitive.mode())
+                    && material.alphaMode() != AlphaMode.BLEND;
+
+                if (rigidFast) {
+                    GltfGpuPrimitive resident = gpu.geometry(primitivePlan, material, passKind);
+                    if (resident != null) {
+                        boolean emissiveVertices = passKind == GltfGeometryPipeline.PassKind.EMISSIVE;
+                        float strength = emissiveVertices
+                            ? material.emissiveStrength() * layerAlpha : 1.0f;
+                        boolean transformLights = layer.lightMode() == GltfRenderLayer.LightMode.INHERIT
+                            && inheritedLight != LightTexture.FULL_BRIGHT
+                            && !emissiveVertices;
+                        resident.draw(
+                            renderType, scratch.model, transformLights, light, packedOverlay,
+                            layerRed * strength, layerGreen * strength, layerBlue * strength,
+                            emissiveVertices ? 1.0f : layerAlpha
+                        );
+                        continue;
+                    }
+                }
+
+                if (!normalReady) {
+                    scratch.normal.set(scratch.model);
+                    float determinant = scratch.normal.determinant();
+                    if (Float.isFinite(determinant) && Math.abs(determinant) > 1.0e-10f) {
+                        scratch.normal.invert().transpose();
+                    } else {
+                        scratch.normal.identity();
+                    }
+                    normalReady = true;
+                }
+                if (!skinReady && skinnedGeometry) {
+                    GltfSkin gltfSkin = instance.asset().skins().get(nodePlan.node.skin());
+                    jointCount = GltfSkinAccess.joints(gltfSkin).length;
+                    skin = instance.nodes().computeSkinPaletteView(
+                        gltfSkin, nodeIndex, pose, instance.animations().poseRevision()
+                    );
+                    skinReady = true;
+                }
+                GltfGeometryPipeline.MaterialPass materialPass =
+                    passKind == GltfGeometryPipeline.PassKind.EMISSIVE
+                        ? GltfGeometryPipeline.MaterialPass.emissive(
+                            material, layerRed, layerGreen, layerBlue
+                        )
+                        : GltfGeometryPipeline.MaterialPass.base(
+                            material, layerRed, layerGreen, layerBlue
+                        );
+                GltfGeometryPipeline.emit(
+                    buffers.getBuffer(renderType), primitive, material, materialPass,
+                    scratch.model, scratch.normal, skin, jointCount, morphWeights,
+                    light, packedOverlay, layerAlpha
                 );
             }
         }
