@@ -11,8 +11,8 @@ import org.lytharalab.gfbs.gltf.GFBSglTF;
 import java.util.Objects;
 
 public final class GltfNetwork {
-    /** 1.2.0 adds bidirectional clock synchronization and a dispatch-tick field. */
-    private static final String VERSION = "2";
+    /** 1.5.1 moves the animation timeline to monotonic seconds and double payloads. */
+    private static final String VERSION = "3";
     private static volatile SimpleChannel channel;
 
     private GltfNetwork() {

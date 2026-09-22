@@ -79,9 +79,9 @@ class AnimationEvaluatorTest {
             new AnimationChannel(0, AnimationPath.TRANSLATION, sampler)));
         AnimationController controller = new AnimationController(asset(clip));
         controller.play("move", PlaybackOptions.loop());
-        controller.update(Float.MAX_VALUE);
-        assertTrue(Float.isFinite(controller.time()));
-        assertTrue(controller.time() >= 0.0f && controller.time() < clip.duration());
+        controller.update((double) Float.MAX_VALUE);
+        assertTrue(Double.isFinite(controller.time()));
+        assertTrue(controller.time() >= 0.0d && controller.time() < (double) clip.duration());
     }
 
 

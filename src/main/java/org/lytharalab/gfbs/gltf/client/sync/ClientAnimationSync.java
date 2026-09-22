@@ -23,22 +23,22 @@ import java.util.Optional;
 /**
  * Client implementation of the server-authoritative animation timeline.
  *
- * <p>Network packets establish state and clock anchors. They never drive individual frames.
- * Bound instances continue to advance at render-frame frequency, while a low-frequency feedback
- * controller makes small playback-speed adjustments to absorb latency and clock drift smoothly.</p>
+ * <p>The timeline is expressed in monotonic seconds and advanced by {@link ClientHeartbeat}, a
+ * lifecycle driver owned by this mod: no {@code TickEvent} is involved and no tick counter is read,
+ * so world-time resets and TPS changes cannot move a running animation. Packets establish state and
+ * offset anchors; the pose keeps advancing at render frequency while a fixed-rate feedback
+ * controller makes small playback-speed adjustments to absorb latency.</p>
  */
 public final class ClientAnimationSync {
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    private static final int UNSYNCHRONIZED_CLOCK_PROBE_TICKS = 20;
-    private static final int SYNCHRONIZED_CLOCK_PROBE_TICKS = 40;
     private static final double PHASE_DEAD_ZONE_SECONDS = 0.015d;
     private static final double PHASE_GAIN = 0.45d;
     private static final double MAX_RELATIVE_SPEED_CORRECTION = 0.35d;
     private static final double MIN_ABSOLUTE_SPEED_CORRECTION = 0.12d;
     private static final double MIN_SPEED_FACTOR = 0.35d;
     private static final double RECOVERY_BLEND_SECONDS = 0.18d;
-    private static final float LATE_PACKET_BLEND_SECONDS = 0.10f;
+    private static final double LATE_PACKET_BLEND_SECONDS = 0.10d;
     private static final double RECOVERY_THRESHOLD_SECONDS = 1.50d;
     private static final long RECOVERY_COOLDOWN_NANOS = 5_000_000_000L;
     private static final long CLIP_REPAIR_COOLDOWN_NANOS = 250_000_000L;
@@ -46,13 +46,10 @@ public final class ClientAnimationSync {
     private static final Map<AnimationTargetKey, Binding> BINDINGS = new HashMap<>();
     private static final Map<AnimationTargetKey, SyncedAnimationState> STATES = new HashMap<>();
     private static final Map<AnimationTargetKey, Long> SEQUENCES = new HashMap<>();
-    private static final ServerTickClock CLOCK = new ServerTickClock();
+    private static final ServerTimeEstimator CLOCK = new ServerTimeEstimator();
 
-    private static long clientTickCounter;
-    private static long nextClockProbeTick;
     private static long nextClockNonce;
     private static long latestClockNonceReceived = Long.MIN_VALUE;
-    private static boolean wasPaused;
 
     private ClientAnimationSync() {
     }
@@ -91,7 +88,12 @@ public final class ClientAnimationSync {
         BINDINGS.remove(key);
     }
 
-    public static void receive(SyncedAnimationState state, long serverTickAtSend) {
+    /**
+     * Receives one authoritative state.
+     *
+     * @param sentAtSeconds server timeline position when the packet left the server
+     */
+    public static void receive(SyncedAnimationState state, double sentAtSeconds) {
         Objects.requireNonNull(state, "state");
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null
@@ -99,12 +101,8 @@ public final class ClientAnimationSync {
             return;
         }
 
-        long now = System.nanoTime();
-        CLOCK.observeServerPacket(
-            serverTickAtSend,
-            now,
-            minecraft.level.getGameTime()
-        );
+        long logicalNanos = ClientHeartbeat.logicalNanos();
+        CLOCK.observeServerPacket(sentAtSeconds, logicalNanos);
 
         long known = SEQUENCES.getOrDefault(state.target(), Long.MIN_VALUE);
         if (state.sequence() <= known) {
@@ -119,7 +117,7 @@ public final class ClientAnimationSync {
             if (instance == null) {
                 BINDINGS.remove(state.target());
             } else {
-                applyState(binding, state, now);
+                applyState(binding, state, System.nanoTime());
                 if (state.stopped()) {
                     STATES.remove(state.target(), state);
                 }
@@ -127,55 +125,37 @@ public final class ClientAnimationSync {
         }
     }
 
-    public static void receiveClockSample(long nonce, long clientSendNanos,
-                                          long serverGameTick, long serverNanos) {
+    public static void receiveClockSample(long nonce, long clientSendNanos, double serverSeconds) {
         if (nonce <= latestClockNonceReceived) {
             return;
         }
         latestClockNonceReceived = nonce;
+        long rttNanos = Math.max(0L, System.nanoTime() - clientSendNanos);
+        CLOCK.observePong(rttNanos, ClientHeartbeat.logicalNanos(), serverSeconds);
+    }
+
+    /** Sends one clock probe; the cadence is owned by {@link ClientHeartbeat}. */
+    static void sendClockProbe() {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.level == null) {
+        if (minecraft.getConnection() == null) {
             return;
         }
-        CLOCK.observePong(
-            clientSendNanos,
-            System.nanoTime(),
-            serverGameTick,
-            serverNanos,
-            minecraft.level.getGameTime()
-        );
+        GltfNetwork.sendToServer(new AnimationClockRequestPacket(++nextClockNonce, System.nanoTime()));
     }
 
     /**
-     * Performs cleanup, clock probing, and smooth drift feedback.
-     * This method deliberately never seeks every tick.
+     * One fixed logical controller step. The step rate belongs to {@link ClientHeartbeat}, so the
+     * smoothing constants below are calibrated for its 20 Hz cadence.
      */
-    public static void tick() {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.level == null) {
+    static void step(long logicalNanos) {
+        if (BINDINGS.isEmpty()) {
             return;
         }
-
-        clientTickCounter++;
-        if (minecraft.isPaused()) {
-            wasPaused = true;
-            removeCollectedBindings();
+        ResourceLocation dimension = currentDimension();
+        if (dimension == null) {
             return;
         }
-        if (wasPaused) {
-            // An integrated server does not advance while the game is paused. Discard monotonic
-            // extrapolation across the pause and use the level tick until a fresh probe arrives.
-            CLOCK.reset();
-            latestClockNonceReceived = nextClockNonce;
-            nextClockProbeTick = 0L;
-            wasPaused = false;
-        }
-        probeClockIfDue(minecraft);
-
-        ResourceLocation dimension = minecraft.level.dimension().location();
-        long now = System.nanoTime();
-        double serverTick = CLOCK.estimate(now, minecraft.level.getGameTime());
-
+        long wallNanos = System.nanoTime();
         Iterator<Map.Entry<AnimationTargetKey, Binding>> iterator = BINDINGS.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<AnimationTargetKey, Binding> entry = iterator.next();
@@ -189,7 +169,7 @@ public final class ClientAnimationSync {
                 continue;
             }
             try {
-                synchronizeBinding(entry.getValue(), instance, state, serverTick, now);
+                synchronizeBinding(entry.getValue(), instance, state, logicalNanos, wallNanos);
             } catch (RuntimeException exception) {
                 LOGGER.error(
                     "Could not synchronize glTF animation {} for target {}",
@@ -201,18 +181,26 @@ public final class ClientAnimationSync {
         }
     }
 
+    /** Discards offset anchors after a pause, a dimension change or a session change. */
+    static void onTimelineRestart() {
+        CLOCK.reset();
+        for (Binding binding : BINDINGS.values()) {
+            binding.smoothedSpeed = Float.NaN;
+        }
+    }
+
     public static void clearDimension(ResourceLocation dimension) {
         BINDINGS.keySet().removeIf(key -> key.dimension().equals(dimension));
         STATES.keySet().removeIf(key -> key.dimension().equals(dimension));
         SEQUENCES.keySet().removeIf(key -> key.dimension().equals(dimension));
-        resetClockState();
     }
 
     public static void clear() {
         BINDINGS.clear();
         STATES.clear();
         SEQUENCES.clear();
-        resetClockState();
+        CLOCK.reset();
+        ClientHeartbeat.reset();
     }
 
     public static boolean isBound(AnimationTargetKey target) {
@@ -232,39 +220,21 @@ public final class ClientAnimationSync {
         return CLOCK.roundTripMillis();
     }
 
-    public static double estimatedServerTicksPerSecond() {
-        return CLOCK.ticksPerSecond();
+    /** Best estimate of the server's monotonic timeline in seconds, or {@code NaN} before sync. */
+    public static double estimatedServerSeconds() {
+        return CLOCK.estimate(ClientHeartbeat.logicalNanos());
     }
 
-    public static double estimatedServerTick() {
+    private static ResourceLocation currentDimension() {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.level == null) {
-            return 0.0d;
-        }
-        return CLOCK.estimate(System.nanoTime(), minecraft.level.getGameTime());
-    }
-
-    private static void removeCollectedBindings() {
-        BINDINGS.entrySet().removeIf(entry -> entry.getValue().instance.get() == null);
-    }
-
-    private static void probeClockIfDue(Minecraft minecraft) {
-        if (minecraft.getConnection() == null || clientTickCounter < nextClockProbeTick) {
-            return;
-        }
-        long nonce = ++nextClockNonce;
-        long sendNanos = System.nanoTime();
-        GltfNetwork.sendToServer(new AnimationClockRequestPacket(nonce, sendNanos));
-        nextClockProbeTick = clientTickCounter + (CLOCK.synchronizedClock()
-            ? SYNCHRONIZED_CLOCK_PROBE_TICKS
-            : UNSYNCHRONIZED_CLOCK_PROBE_TICKS);
+        return minecraft.level == null ? null : minecraft.level.dimension().location();
     }
 
     private static void synchronizeBinding(Binding binding, GltfInstance instance,
-                                           SyncedAnimationState state, double serverTick,
-                                           long nowNanos) {
+                                           SyncedAnimationState state, long logicalNanos,
+                                           long wallNanos) {
         if (binding.appliedSequence != state.sequence()) {
-            applyState(binding, state, nowNanos);
+            applyState(binding, state, wallNanos);
             return;
         }
         if (state.stopped()) {
@@ -272,27 +242,32 @@ public final class ClientAnimationSync {
         }
 
         AnimationClip expectedClip = instance.asset().animation(state.animation()).orElse(null);
-        AnimationClip currentClip = instance.animations().currentClip().orElse(null);
         if (expectedClip == null) {
             throw new IllegalArgumentException("Unknown synchronized animation: " + state.animation());
         }
+        AnimationClip currentClip = instance.animations().currentClip().orElse(null);
         if (currentClip != expectedClip) {
-            if (nowNanos - binding.lastClipRepairNanos >= CLIP_REPAIR_COOLDOWN_NANOS) {
-                applyState(binding, state, nowNanos);
+            if (wallNanos - binding.lastClipRepairNanos >= CLIP_REPAIR_COOLDOWN_NANOS) {
+                applyState(binding, state, wallNanos);
             }
             return;
         }
 
-        float authoritativeClientSpeed = effectiveClientSpeed(state.speed());
+        // The timeline is real time on both sides, so the authoritative speed needs no TPS scaling.
+        float authoritativeSpeed = state.speed();
         if (!state.playing()) {
-            instance.animations().setSpeed(authoritativeClientSpeed);
+            instance.animations().setSpeed(authoritativeSpeed);
             instance.animations().pause();
-            binding.smoothedSpeed = authoritativeClientSpeed;
+            binding.smoothedSpeed = authoritativeSpeed;
             return;
         }
 
-        float duration = expectedClip.duration();
-        double expectedTime = normalizeTime(state.timeAt(serverTick), duration, state.loopMode());
+        double serverSeconds = CLOCK.estimate(logicalNanos);
+        if (!Double.isFinite(serverSeconds)) {
+            return;
+        }
+        double duration = (double) expectedClip.duration();
+        double expectedTime = normalizeTime(state.timeAt(serverSeconds), duration, state.loopMode());
         double actualTime = instance.animations().time();
         double phaseError = phaseError(expectedTime, actualTime, duration, state.loopMode());
 
@@ -303,21 +278,21 @@ public final class ClientAnimationSync {
 
         double recoveryThreshold = recoveryThreshold(duration, state.loopMode());
         if (Math.abs(phaseError) > recoveryThreshold
-            && nowNanos - binding.lastRecoveryNanos >= RECOVERY_COOLDOWN_NANOS) {
-            recoverSmoothly(binding, instance, state, expectedTime, nowNanos);
+            && wallNanos - binding.lastRecoveryNanos >= RECOVERY_COOLDOWN_NANOS) {
+            recoverSmoothly(binding, instance, state, expectedTime, wallNanos);
             return;
         }
 
-        float targetSpeed = correctedSpeed(authoritativeClientSpeed, phaseError);
+        float targetSpeed = correctedSpeed(authoritativeSpeed, phaseError);
         if (!Float.isFinite(binding.smoothedSpeed)) {
-            binding.smoothedSpeed = authoritativeClientSpeed;
+            binding.smoothedSpeed = authoritativeSpeed;
         }
         float smoothing = Math.abs(phaseError) > 0.50d ? 0.35f : 0.18f;
         binding.smoothedSpeed += (targetSpeed - binding.smoothedSpeed) * smoothing;
         instance.animations().setSpeed(binding.smoothedSpeed);
     }
 
-    private static void applyState(Binding binding, SyncedAnimationState state, long nowNanos) {
+    private static void applyState(Binding binding, SyncedAnimationState state, long wallNanos) {
         GltfInstance instance = binding.instance.get();
         if (instance == null) {
             return;
@@ -327,24 +302,18 @@ public final class ClientAnimationSync {
                 instance.animations().stop(true);
                 binding.appliedSequence = state.sequence();
                 binding.smoothedSpeed = Float.NaN;
-                binding.lastClipRepairNanos = nowNanos;
+                binding.lastClipRepairNanos = wallNanos;
                 return;
             }
 
-            Minecraft minecraft = Minecraft.getInstance();
-            double fallbackTick = minecraft.level == null
-                ? state.serverStartTick()
-                : minecraft.level.getGameTime();
-            double serverTick = CLOCK.estimate(nowNanos, fallbackTick);
-            float time = state.timeAt(serverTick);
-            float remainingTransition = scaleLogicalDurationToClient(
-                state.remainingTransitionAt(serverTick)
-            );
-            double stateAgeSeconds = Math.max(
-                0.0d,
-                (serverTick - (double) state.serverStartTick()) / 20.0d
-            );
-            if (remainingTransition == 0.0f && stateAgeSeconds > 0.05d) {
+            double serverSeconds = CLOCK.estimate(ClientHeartbeat.logicalNanos());
+            if (!Double.isFinite(serverSeconds)) {
+                serverSeconds = state.startSeconds();
+            }
+            double time = state.timeAt(serverSeconds);
+            double remainingTransition = state.remainingTransitionAt(serverSeconds);
+            double stateAgeSeconds = Math.max(0.0d, serverSeconds - state.startSeconds());
+            if (remainingTransition <= 0.0d && stateAgeSeconds > 0.05d) {
                 // The client cannot display a command before it arrives. A very short pose blend
                 // hides that unavoidable late arrival without moving the authoritative timeline.
                 remainingTransition = LATE_PACKET_BLEND_SECONDS;
@@ -359,15 +328,15 @@ public final class ClientAnimationSync {
                     time
                 )
             );
-            float authoritativeClientSpeed = effectiveClientSpeed(state.speed());
-            instance.animations().setSpeed(authoritativeClientSpeed);
+            float authoritativeSpeed = state.speed();
+            instance.animations().setSpeed(authoritativeSpeed);
             if (!state.playing()) {
                 instance.animations().pause();
             }
 
             binding.appliedSequence = state.sequence();
-            binding.smoothedSpeed = authoritativeClientSpeed;
-            binding.lastClipRepairNanos = nowNanos;
+            binding.smoothedSpeed = authoritativeSpeed;
+            binding.lastClipRepairNanos = wallNanos;
         } catch (RuntimeException exception) {
             LOGGER.error(
                 "Could not apply synchronized glTF animation {} to target {}",
@@ -380,21 +349,21 @@ public final class ClientAnimationSync {
 
     private static void recoverSmoothly(Binding binding, GltfInstance instance,
                                         SyncedAnimationState state, double expectedTime,
-                                        long nowNanos) {
+                                        long wallNanos) {
         instance.animations().play(
             state.animation(),
             new PlaybackOptions(
                 state.speed(),
                 state.loopMode(),
-                (float) RECOVERY_BLEND_SECONDS,
-                (float) expectedTime
+                RECOVERY_BLEND_SECONDS,
+                expectedTime
             )
         );
-        float authoritativeClientSpeed = effectiveClientSpeed(state.speed());
-        instance.animations().setSpeed(authoritativeClientSpeed);
-        binding.smoothedSpeed = authoritativeClientSpeed;
-        binding.lastRecoveryNanos = nowNanos;
-        binding.lastClipRepairNanos = nowNanos;
+        float authoritativeSpeed = state.speed();
+        instance.animations().setSpeed(authoritativeSpeed);
+        binding.smoothedSpeed = authoritativeSpeed;
+        binding.lastRecoveryNanos = wallNanos;
+        binding.lastClipRepairNanos = wallNanos;
     }
 
     private static float correctedSpeed(float authoritativeSpeed, double phaseError) {
@@ -420,32 +389,10 @@ public final class ClientAnimationSync {
         return (float) corrected;
     }
 
-    private static float effectiveClientSpeed(float stateSpeed) {
-        double ratio = CLOCK.synchronizedClock()
-            ? clamp(CLOCK.ticksPerSecond() / ServerTickClock.NOMINAL_TICKS_PER_SECOND, 0.0d, 1.025d)
-            : 1.0d;
-        return (float) ((double) stateSpeed * ratio);
-    }
-
-    private static float scaleLogicalDurationToClient(float logicalSeconds) {
-        if (logicalSeconds <= 0.0f || !CLOCK.synchronizedClock()) {
-            return logicalSeconds;
-        }
-        double ratio = clamp(
-            CLOCK.ticksPerSecond() / ServerTickClock.NOMINAL_TICKS_PER_SECOND,
-            0.0d,
-            1.025d
-        );
-        if (ratio <= 1.0e-4d) {
-            return logicalSeconds;
-        }
-        return (float) Math.min(10.0d, (double) logicalSeconds / ratio);
-    }
-
-    private static double phaseError(double expected, double actual, float duration,
+    private static double phaseError(double expected, double actual, double duration,
                                      LoopMode loopMode) {
         double error = expected - actual;
-        if (loopMode == LoopMode.LOOP && duration > 0.0f) {
+        if (loopMode == LoopMode.LOOP && duration > 0.0d) {
             double half = duration * 0.5d;
             while (error > half) {
                 error -= duration;
@@ -457,15 +404,15 @@ public final class ClientAnimationSync {
         return error;
     }
 
-    private static double normalizeTime(double time, float duration, LoopMode loopMode) {
-        if (loopMode == LoopMode.LOOP && duration > 0.0f) {
+    private static double normalizeTime(double time, double duration, LoopMode loopMode) {
+        if (loopMode == LoopMode.LOOP && duration > 0.0d) {
             double result = time % duration;
             return result < 0.0d ? result + duration : result;
         }
         return Math.max(0.0d, Math.min(duration, time));
     }
 
-    private static boolean isFinishedOnce(double expectedTime, float duration, float speed,
+    private static boolean isFinishedOnce(double expectedTime, double duration, float speed,
                                           LoopMode loopMode) {
         if (loopMode == LoopMode.LOOP) {
             return false;
@@ -473,8 +420,8 @@ public final class ClientAnimationSync {
         return speed > 0.0f ? expectedTime >= duration : expectedTime <= 0.0d;
     }
 
-    private static double recoveryThreshold(float duration, LoopMode loopMode) {
-        if (loopMode == LoopMode.LOOP && duration > 0.0f) {
+    private static double recoveryThreshold(double duration, LoopMode loopMode) {
+        if (loopMode == LoopMode.LOOP && duration > 0.0d) {
             return Math.max(0.35d, Math.min(RECOVERY_THRESHOLD_SECONDS, duration * 0.45d));
         }
         return RECOVERY_THRESHOLD_SECONDS;
@@ -482,16 +429,6 @@ public final class ClientAnimationSync {
 
     private static double clamp(double value, double minimum, double maximum) {
         return Math.max(minimum, Math.min(maximum, value));
-    }
-
-    private static void resetClockState() {
-        CLOCK.reset();
-        clientTickCounter = 0L;
-        nextClockProbeTick = 0L;
-        // Reject replies to probes issued before the dimension/session reset while keeping the
-        // nonce monotonic for the lifetime of the client process.
-        latestClockNonceReceived = nextClockNonce;
-        wasPaused = false;
     }
 
     private static final class Binding {

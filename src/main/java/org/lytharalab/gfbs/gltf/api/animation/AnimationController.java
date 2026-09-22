@@ -17,6 +17,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public final class AnimationController {
     public static final String BASE_LAYER = "base";
 
+    /** Blend bookkeeping is short-lived; a huge frame delta must not overflow the fade accumulator. */
+    private static final double MAX_FADE_STEP_SECONDS = 60.0d;
+
     private final GltfAsset asset;
     private final ModelPose pose;
     private final ModelPose bind;
@@ -189,14 +192,14 @@ public final class AnimationController {
         listeners.remove(listener);
     }
 
-    public void update(float deltaSeconds) {
-        if (!Float.isFinite(deltaSeconds)) {
+    public void update(double deltaSeconds) {
+        if (!Double.isFinite(deltaSeconds)) {
             throw new IllegalArgumentException("Delta time must be finite");
         }
-        if (deltaSeconds == 0.0f || tracks.isEmpty()) return;
+        if (deltaSeconds == 0.0d || tracks.isEmpty()) return;
 
         boolean dirty = false;
-        float elapsed = Math.abs(deltaSeconds);
+        float elapsed = (float) Math.min(Math.abs(deltaSeconds), MAX_FADE_STEP_SECONDS);
         Iterator<Map.Entry<String, Track>> iterator = tracks.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, Track> entry = iterator.next();
@@ -215,9 +218,9 @@ public final class AnimationController {
             }
             if (track.source != null) {
                 float beforeTransition = track.transition;
-                track.transition = Math.min(
+                track.transition = (float) Math.min(
                     track.options.transitionSeconds(),
-                    track.transition + elapsed
+                    (double) track.transition + (double) elapsed
                 );
                 dirty |= beforeTransition != track.transition;
                 if (track.transition >= track.options.transitionSeconds()) {
@@ -228,12 +231,12 @@ public final class AnimationController {
         if (dirty) evaluate();
     }
 
-    public void seek(float seconds) {
+    public void seek(double seconds) {
         seekLayer(BASE_LAYER, seconds);
     }
 
-    public void seekLayer(String layer, float seconds) {
-        if (!Float.isFinite(seconds)) {
+    public void seekLayer(String layer, double seconds) {
+        if (!Double.isFinite(seconds)) {
             throw new IllegalArgumentException("Animation time must be finite");
         }
         Track track = tracks.get(layer);
@@ -288,9 +291,10 @@ public final class AnimationController {
     /** Monotonically increases whenever the evaluated pose changes. */
     public long poseRevision() { return poseRevision; }
 
-    public float time() {
+    /** Exact double playhead of the base layer. Never quantized through {@code float}. */
+    public double time() {
         Track track = tracks.get(BASE_LAYER);
-        return track == null ? 0.0f : track.time;
+        return track == null ? 0.0d : track.time;
     }
 
     public boolean isPlaying() {
@@ -303,23 +307,23 @@ public final class AnimationController {
         return track == null ? Optional.empty() : Optional.of(track.clip);
     }
 
-    private void advance(String layer, Track track, float deltaSeconds) {
+    private void advance(String layer, Track track, double deltaSeconds) {
         if (track.speed == 0.0f) {
             return;
         }
-        float before = track.time;
-        float duration = track.clip.duration();
-        double raw = (double) before + (double) deltaSeconds * track.speed;
+        double before = track.time;
+        double duration = (double) track.clip.duration();
+        double raw = before + deltaSeconds * (double) track.speed;
         boolean wrapped = false;
 
         if (track.options.loopMode() == LoopMode.LOOP && duration > 0.0f) {
-            track.time = (float) positiveModulo(raw, duration);
+            track.time = positiveModulo(raw, duration);
             wrapped = track.speed > 0.0f
                 ? raw >= duration || raw < 0.0d
                 : raw <= 0.0d || raw > duration;
         } else {
             boolean reachedEnd = track.speed > 0.0f ? raw >= duration : raw <= 0.0d;
-            track.time = (float) Math.max(0.0d, Math.min(duration, raw));
+            track.time = Math.max(0.0d, Math.min(duration, raw));
             if (reachedEnd) {
                 track.playing = false;
             }
@@ -327,7 +331,7 @@ public final class AnimationController {
         fireEvents(layer, track, before, track.time, wrapped);
     }
 
-    private void fireEvents(String layer, Track track, float before, float now, boolean wrapped) {
+    private void fireEvents(String layer, Track track, double before, double now, boolean wrapped) {
         List<AnimationEvent> clipEvents = events.get(track.clip.name());
         if (clipEvents == null) {
             return;
@@ -399,7 +403,7 @@ public final class AnimationController {
         output.reset();
         AnimationEvaluator.apply(track.clip, track.time, output);
         if (track.source != null && track.options.transitionSeconds() > 0.0f) {
-            float alpha = Math.min(1.0f, track.transition / track.options.transitionSeconds());
+            float alpha = (float) Math.min(1.0d, (double) track.transition / track.options.transitionSeconds());
             for (int node = 0; node < output.nodeCount(); node++) {
                 if (track.mask.includes(node)) {
                     blend(track.source.node(node), output.node(node), alpha);
@@ -546,10 +550,11 @@ public final class AnimationController {
         );
     }
 
-    private static float normalizeTime(AnimationClip clip, float time, LoopMode loopMode) {
-        return loopMode == LoopMode.LOOP && clip.duration() > 0.0f
-            ? (float) positiveModulo(time, clip.duration())
-            : Math.max(0.0f, Math.min(clip.duration(), time));
+    private static double normalizeTime(AnimationClip clip, double time, LoopMode loopMode) {
+        double duration = (double) clip.duration();
+        return loopMode == LoopMode.LOOP && duration > 0.0d
+            ? positiveModulo(time, duration)
+            : Math.max(0.0d, Math.min(duration, time));
     }
 
     private static double positiveModulo(double value, double modulus) {
@@ -562,7 +567,7 @@ public final class AnimationController {
         private final PlaybackOptions options;
         private final AnimationBlendMode mode;
         private final AnimationMask mask;
-        private float time;
+        private double time;
         private float speed;
         private float weight;
         private float target;
@@ -573,7 +578,7 @@ public final class AnimationController {
         private boolean remove;
         private ModelPose source;
 
-        private Track(AnimationClip clip, PlaybackOptions options, float time, float weight,
+        private Track(AnimationClip clip, PlaybackOptions options, double time, float weight,
                       AnimationBlendMode mode, AnimationMask mask, ModelPose source) {
             this.clip = clip;
             this.options = options;

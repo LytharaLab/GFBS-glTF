@@ -7,22 +7,24 @@ import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-/** Server-to-client response containing a logical tick and a server monotonic timestamp. */
-public record AnimationClockResponsePacket(long nonce, long clientSendNanos,
-                                           long serverGameTick, long serverNanos) {
+/**
+ * Server-to-client response carrying the server's monotonic timeline position in seconds.
+ *
+ * <p>Because both sides derive time from {@link System#nanoTime()}, the estimator only has to solve
+ * for an offset; the previous design additionally had to infer a tick rate from game ticks.</p>
+ */
+public record AnimationClockResponsePacket(long nonce, long clientSendNanos, double serverSeconds) {
     static void encode(AnimationClockResponsePacket packet, FriendlyByteBuf buffer) {
         buffer.writeVarLong(packet.nonce);
         buffer.writeLong(packet.clientSendNanos);
-        buffer.writeVarLong(packet.serverGameTick);
-        buffer.writeLong(packet.serverNanos);
+        buffer.writeDouble(packet.serverSeconds);
     }
 
     static AnimationClockResponsePacket decode(FriendlyByteBuf buffer) {
         return new AnimationClockResponsePacket(
             buffer.readVarLong(),
             buffer.readLong(),
-            buffer.readVarLong(),
-            buffer.readLong()
+            buffer.readDouble()
         );
     }
 
@@ -40,8 +42,7 @@ public record AnimationClockResponsePacket(long nonce, long clientSendNanos,
             org.lytharalab.gfbs.gltf.client.sync.ClientAnimationSync.receiveClockSample(
                 packet.nonce,
                 packet.clientSendNanos,
-                packet.serverGameTick,
-                packet.serverNanos
+                packet.serverSeconds
             );
         }
     }
