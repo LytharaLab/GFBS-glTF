@@ -65,8 +65,14 @@ public final class GltfInstance implements AutoCloseable {
     public void resetNodeVisibility() {
         for (var node : nodes.all()) node.subtreeVisible(true);
     }
-    public void update(float deltaSeconds) {
-        if (!Float.isFinite(deltaSeconds)) throw new IllegalArgumentException("Delta time must be finite");
+    /**
+     * Advances every animation track and the collision shape by wall-clock seconds.
+     *
+     * <p>{@code deltaSeconds} is a {@code double} on purpose: the playhead keeps full resolution no
+     * matter how long a model has been animating.</p>
+     */
+    public void update(double deltaSeconds) {
+        if (!Double.isFinite(deltaSeconds)) throw new IllegalArgumentException("Delta time must be finite");
         animations.update(deltaSeconds);
         collision.update();
     }

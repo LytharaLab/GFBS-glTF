@@ -28,5 +28,6 @@ public final class AnimationSyncEvents {
     @SubscribeEvent
     public static void stopped(ServerStoppedEvent event) {
         ServerAnimationManager.remove(event.getServer());
+        ServerClock.remove(event.getServer());
     }
 }

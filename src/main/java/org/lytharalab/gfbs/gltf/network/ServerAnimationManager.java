@@ -17,7 +17,13 @@ import java.util.Objects;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Stores authoritative clip state; bone matrices and render frames are never streamed. */
+/**
+ * Stores authoritative clip state; bone matrices and render frames are never streamed.
+ *
+ * <p>Every timestamp comes from {@link ServerClock}, a monotonic seconds timeline owned by this mod.
+ * Nothing here reads {@code Level#getGameTime()}, so world-time resets, {@code /time set} and tick
+ * freezes can no longer move a running animation.</p>
+ */
 public final class ServerAnimationManager {
     private static final Map<MinecraftServer, ServerAnimationManager> INSTANCES =
         Collections.synchronizedMap(new WeakHashMap<>());
@@ -44,14 +50,15 @@ public final class ServerAnimationManager {
     }
 
     public SyncedAnimationState play(ServerLevel level, AnimationTargetKey target, String animation,
-                                     float speed, LoopMode mode, float transition) {
+                                     float speed, LoopMode mode, double transition) {
         requireServerThread();
         requireDimension(level, target);
+        double now = clock().nowSeconds();
         SyncedAnimationState state = new SyncedAnimationState(
             target,
             animation,
-            level.getGameTime(),
-            0.0f,
+            now,
+            0.0d,
             speed,
             mode,
             transition,
@@ -71,15 +78,16 @@ public final class ServerAnimationManager {
         if (old == null || old.stopped() || !old.playing()) {
             return;
         }
-        float time = old.timeAt(level.getGameTime());
+        double now = clock().nowSeconds();
+        double time = old.timeAt(now);
         update(level, new SyncedAnimationState(
             target,
             old.animation(),
-            level.getGameTime(),
+            now,
             time,
             old.speed(),
             old.loopMode(),
-            0.0f,
+            0.0d,
             false,
             false,
             nextSequence()
@@ -96,11 +104,11 @@ public final class ServerAnimationManager {
         update(level, new SyncedAnimationState(
             target,
             old.animation(),
-            level.getGameTime(),
+            clock().nowSeconds(),
             old.initialSeconds(),
             old.speed(),
             old.loopMode(),
-            0.0f,
+            0.0d,
             true,
             false,
             nextSequence()
@@ -115,11 +123,11 @@ public final class ServerAnimationManager {
         SyncedAnimationState state = new SyncedAnimationState(
             target,
             animation,
-            level.getGameTime(),
-            0.0f,
+            clock().nowSeconds(),
+            0.0d,
             1.0f,
             LoopMode.ONCE,
-            0.0f,
+            0.0d,
             false,
             true,
             nextSequence()
@@ -129,10 +137,10 @@ public final class ServerAnimationManager {
 
     public void sendSnapshot(ServerPlayer player) {
         requireServerThread();
-        long dispatchTick = player.serverLevel().getGameTime();
+        double sentAtSeconds = clock().nowSeconds();
         for (SyncedAnimationState state : states.values()) {
             if (state.target().dimension().equals(player.level().dimension().location())) {
-                GltfNetwork.send(player, new AnimationStatePacket(state, dispatchTick));
+                GltfNetwork.send(player, new AnimationStatePacket(state, sentAtSeconds));
             }
         }
     }
@@ -148,22 +156,34 @@ public final class ServerAnimationManager {
     }
 
     private static void broadcast(ServerLevel level, SyncedAnimationState state) {
-        AnimationStatePacket packet = new AnimationStatePacket(state, level.getGameTime());
+        AnimationStatePacket packet = new AnimationStatePacket(
+            state,
+            ServerClock.get(level.getServer()).nowSeconds()
+        );
         for (ServerPlayer player : level.players()) {
             GltfNetwork.send(player, packet);
         }
     }
 
+    private ServerClock clock() {
+        return ServerClock.get(requireServer());
+    }
+
     private void requireServerThread() {
-        MinecraftServer currentServer = server.get();
-        if (currentServer == null) {
-            throw new IllegalStateException("Minecraft server is no longer available");
-        }
+        MinecraftServer currentServer = requireServer();
         if (!currentServer.isSameThread()) {
             throw new IllegalStateException(
                 "Server animation state must be changed on the Minecraft server thread"
             );
         }
+    }
+
+    private MinecraftServer requireServer() {
+        MinecraftServer currentServer = server.get();
+        if (currentServer == null) {
+            throw new IllegalStateException("Minecraft server is no longer available");
+        }
+        return currentServer;
     }
 
     private long nextSequence() {

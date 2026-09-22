@@ -5,6 +5,7 @@ import net.minecraftforge.api.distmarker.OnlyIn;
 import org.lytharalab.gfbs.gltf.api.sync.AnimationTargetKey;
 import org.lytharalab.gfbs.gltf.api.sync.SyncedAnimationState;
 import org.lytharalab.gfbs.gltf.client.sync.ClientAnimationSync;
+import org.lytharalab.gfbs.gltf.client.sync.ClientHeartbeat;
 
 import java.util.Optional;
 
@@ -39,12 +40,21 @@ public final class SyncedGltfAnimations {
         return ClientAnimationSync.estimatedRoundTripMillis();
     }
 
-    /** Returns the server's estimated logical TPS used by the synchronization clock. */
-    public static double estimatedServerTicksPerSecond() {
-        return ClientAnimationSync.estimatedServerTicksPerSecond();
+    /**
+     * Returns the server's monotonic timeline position in seconds, or {@code NaN} before the first
+     * state packet arrives. Replaces the tick-based {@code estimatedServerTick()} of 1.5.0.
+     */
+    public static double estimatedServerSeconds() {
+        return ClientAnimationSync.estimatedServerSeconds();
     }
 
-    public static double estimatedServerTick() {
-        return ClientAnimationSync.estimatedServerTick();
+    /** Returns the mod-owned logical clock in seconds; it stops while the world is paused. */
+    public static double logicalSeconds() {
+        return ClientHeartbeat.logicalSeconds();
+    }
+
+    /** Number of fixed logical controller steps the heartbeat has executed. */
+    public static long heartbeatSteps() {
+        return ClientHeartbeat.steps();
     }
 }

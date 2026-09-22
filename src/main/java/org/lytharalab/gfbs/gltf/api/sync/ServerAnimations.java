@@ -9,7 +9,7 @@ public final class ServerAnimations {
     }
 
     public static SyncedAnimationState play(ServerLevel level, AnimationTargetKey target, String animation,
-                                             float speed, LoopMode loopMode, float transitionSeconds) {
+                                             float speed, LoopMode loopMode, double transitionSeconds) {
         return ServerAnimationManager.get(level.getServer()).play(level, target, animation, speed, loopMode, transitionSeconds);
     }
 

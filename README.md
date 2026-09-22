@@ -15,16 +15,17 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 - [Releases](https://github.com/LytharaLab/GFBS-glTF/releases)
 - [Issue tracker](https://github.com/LytharaLab/GFBS-glTF/issues)
 - [Pull requests](https://github.com/LytharaLab/GFBS-glTF/pulls)
-- [1.x API guide](docs/1.x-API.md)
+- [1.5 API guide](docs/1.x-API.md)
 - [Plugin development guide](docs/PLUGINS.md)
 - [1.5 migration guide](docs/MIGRATING-1.5.md)
+- [1.5.1 migration guide](docs/MIGRATING-1.5.1.md)
 
 ## Status and compatibility
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.5.0` |
-| Public API | `1.5` |
+| GFBS: glTF | `1.5.1` |
+| Public API | `1.5.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -52,7 +53,7 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
   variants, complete sparse overrides for every glTF material property, and `PBR`, `UNLIT`, or
   game-style `NEON` shading without mutating shared assets.
 - Animation playback, seeking, pausing, transitions, layers, masks, additive blending, fades, and user-defined events.
-- Latency-tolerant server-authoritative animation synchronization for entities, block entities, and custom targets, with RTT clock probes, actual-TPS estimation, fractional-tick prediction, smooth speed correction, and sequence ordering.
+- Latency-tolerant server-authoritative animation synchronization for entities, block entities, and custom targets, driven by a tick-free monotonic seconds timeline: RTT clock probes, exact `double` timeline math, a frame-driven heartbeat with fixed logical steps, smooth speed correction, and sequence ordering.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
 - Per-instance, per-node, and per-part RenderType selection with a validated custom RenderType builder.
 - Native triangle submission for glTF triangle, strip, and fan primitives—no degenerate quad padding.
@@ -255,15 +256,46 @@ dedicated emissive pass, allowing shader-pack bloom. It deliberately does not cr
 or a dynamic point light. Resolved variants are cached, so repeatedly switching between reusable
 states does not rebuild runtime materials every frame.
 
+## Tick-free synchronization in 1.5.1
+
+Version 1.5.1 removes the two properties that made long-running synchronized animations stutter, and
+it removes the tick loop from the synchronization path entirely.
+
+**The timeline is exact.** Every timestamp on the animation path is monotonic seconds in `double`:
+`SyncedAnimationState`, the packet payloads, `PlaybackOptions`, the `AnimationController` playhead,
+its seek API, and `GltfInstance.update`. 1.5.0 returned the authoritative time as a `float`, whose
+resolution is relative: after roughly six days of logical animation time a float step is already
+62.5 ms. The client controller has a 15 ms dead zone, so it could never settle — it kept chasing a
+staircase with speed corrections, which the player sees as stuttering. The same timestamp in `double`
+still carries ~0.1 ns of resolution, so the controller sits inside its dead zone and the pose simply
+advances.
+
+**The timeline left the tick domain.** States, packets and the client estimator carry seconds, not
+game ticks, so `Level#getGameTime()` can no longer influence a running animation: world-time resets,
+`/time set`, TPS drops and tick freezes neither move nor slow down a clip.
+
+**The lifecycle is ours.** `RenderLevelStageEvent.Stage.AFTER_ENTITIES` drives
+`ClientHeartbeat`; the heartbeat owns a pause-aware `SessionClock` and a frame-rate independent
+`FixedStepScheduler`, and it calls `ClientAnimationSync.step(...)` at a fixed 20 Hz logical cadence
+derived from real frame time. There is no `TickEvent` registration, a stalled or minimized frame
+drops its catch-up debt instead of replaying it, and single-player pause freezes the logical clock so
+a paused world resumes where it stopped. On the server, `ServerClock` is the authority and
+`ServerTimeEstimator` solves for a single offset because both endpoints already share the same
+real-time rate.
+
+The controller still never seeks every frame: normal drift is absorbed by small live speed changes,
+a late packet is applied at the position the clip should have reached, and only a catastrophic error
+triggers one blended rebase, protected by a cooldown.
+
 ## Animation synchronization in 1.2.0
 
 GFBS: glTF 1.2.0 keeps animation commands server-authoritative without streaming bones or
 quantizing rendering to the server tick rate. The server sends clip state and time anchors; each
 client reconstructs the same logical timeline and advances its instance at render-frame frequency.
 
-The client periodically measures network RTT, estimates the server's actual logical TPS, scales
-real-time playback to that TPS, and uses a fractional server-tick clock. Normal drift is corrected by
-temporarily changing the live playback speed by a small amount instead of seeking every client tick. A late packet is applied at the
+The 1.2.0 clock inferred the server's logical TPS and expressed the timeline in fractional server
+ticks; 1.5.1 replaced both with the monotonic seconds timeline described above. Normal drift is still
+corrected by temporarily changing the live playback speed by a small amount instead of seeking every frame. A late packet is applied at the
 position the animation should have reached on the server, with a short pose blend to hide the
 unavoidable first visible jump. Only catastrophic desynchronization can trigger a one-time blended
 rebase, protected by a cooldown.

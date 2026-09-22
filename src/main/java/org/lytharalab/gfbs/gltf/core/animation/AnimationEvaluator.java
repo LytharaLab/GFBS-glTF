@@ -6,8 +6,8 @@ public final class AnimationEvaluator {
     private AnimationEvaluator() {
     }
 
-    public static void apply(AnimationClip clip, float time, ModelPose pose) {
-        if (!Float.isFinite(time)) throw new IllegalArgumentException("Animation time must be finite");
+    public static void apply(AnimationClip clip, double time, ModelPose pose) {
+        if (!Double.isFinite(time)) throw new IllegalArgumentException("Animation time must be finite");
         for (AnimationChannel channel : clip.channels()) {
             NodePose node = pose.node(channel.node());
             int components = channel.sampler().components();
@@ -21,12 +21,12 @@ public final class AnimationEvaluator {
         }
     }
 
-    public static void sample(AnimationSampler sampler, AnimationPath path, float time, float[] target) {
-        if (!Float.isFinite(time)) throw new IllegalArgumentException("Animation time must be finite");
+    public static void sample(AnimationSampler sampler, AnimationPath path, double time, float[] target) {
+        if (!Double.isFinite(time)) throw new IllegalArgumentException("Animation time must be finite");
         int components = sampler.components();
         if (target.length < components) throw new IllegalArgumentException("Animation target is too small");
         int keyframes = sampler.keyframeCount();
-        if (time <= sampler.time(0)) {
+        if (time <= (double) sampler.time(0)) {
             copyKey(sampler, 0, target);
             if (path == AnimationPath.ROTATION) normalizeQuaternion(target);
             return;
@@ -42,8 +42,8 @@ public final class AnimationEvaluator {
             int mid = (low + high) >>> 1;
             if (sampler.time(mid) <= time) low = mid; else high = mid;
         }
-        float delta = sampler.time(high) - sampler.time(low);
-        float alpha = (time - sampler.time(low)) / delta;
+        double delta = (double) sampler.time(high) - (double) sampler.time(low);
+        float alpha = delta > 0.0d ? (float) ((time - (double) sampler.time(low)) / delta) : 0.0f;
         switch (sampler.interpolation()) {
             case STEP -> {
                 copyKey(sampler, low, target);
@@ -65,9 +65,12 @@ public final class AnimationEvaluator {
                 float h10 = t3 - 2 * t2 + alpha;
                 float h01 = -2 * t3 + 3 * t2;
                 float h11 = t3 - t2;
+                // Tangent scaling uses the keyframe interval, not an accumulated timeline value, so a
+                // float factor is exact enough and keeps the interpolation in float arithmetic.
+                float deltaFactor = (float) delta;
                 for (int c = 0; c < components; c++) {
-                    target[c] = h00 * sampler.value(value0 + c) + h10 * delta * sampler.value(outTangent0 + c)
-                        + h01 * sampler.value(value1 + c) + h11 * delta * sampler.value(inTangent1 + c);
+                    target[c] = h00 * sampler.value(value0 + c) + h10 * deltaFactor * sampler.value(outTangent0 + c)
+                        + h01 * sampler.value(value1 + c) + h11 * deltaFactor * sampler.value(inTangent1 + c);
                 }
                 if (path == AnimationPath.ROTATION) normalizeQuaternion(target);
             }

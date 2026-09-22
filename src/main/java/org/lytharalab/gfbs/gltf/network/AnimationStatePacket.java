@@ -10,23 +10,26 @@ import org.lytharalab.gfbs.gltf.api.sync.SyncedAnimationState;
 
 import java.util.function.Supplier;
 
-/** An authoritative animation state plus the server tick at which the packet was dispatched. */
-public record AnimationStatePacket(SyncedAnimationState state, long serverTickAtSend) {
+/**
+ * An authoritative animation state plus the server timeline position (monotonic seconds) at which
+ * the packet was dispatched. No tick counter is involved anywhere on this path.
+ */
+public record AnimationStatePacket(SyncedAnimationState state, double sentAtSeconds) {
     static void encode(AnimationStatePacket packet, FriendlyByteBuf buffer) {
         SyncedAnimationState state = packet.state;
         buffer.writeResourceLocation(state.target().dimension());
         buffer.writeEnum(state.target().kind());
         buffer.writeUtf(state.target().id(), 512);
         buffer.writeUtf(state.animation(), 256);
-        buffer.writeVarLong(state.serverStartTick());
-        buffer.writeFloat(state.initialSeconds());
+        buffer.writeDouble(state.startSeconds());
+        buffer.writeDouble(state.initialSeconds());
         buffer.writeFloat(state.speed());
         buffer.writeEnum(state.loopMode());
-        buffer.writeFloat(state.transitionSeconds());
+        buffer.writeDouble(state.transitionSeconds());
         buffer.writeBoolean(state.playing());
         buffer.writeBoolean(state.stopped());
         buffer.writeVarLong(state.sequence());
-        buffer.writeVarLong(packet.serverTickAtSend);
+        buffer.writeDouble(packet.sentAtSeconds);
     }
 
     static AnimationStatePacket decode(FriendlyByteBuf buffer) {
@@ -38,16 +41,16 @@ public record AnimationStatePacket(SyncedAnimationState state, long serverTickAt
         SyncedAnimationState state = new SyncedAnimationState(
             target,
             buffer.readUtf(256),
-            buffer.readVarLong(),
-            buffer.readFloat(),
+            buffer.readDouble(),
+            buffer.readDouble(),
             buffer.readFloat(),
             buffer.readEnum(LoopMode.class),
-            buffer.readFloat(),
+            buffer.readDouble(),
             buffer.readBoolean(),
             buffer.readBoolean(),
             buffer.readVarLong()
         );
-        return new AnimationStatePacket(state, buffer.readVarLong());
+        return new AnimationStatePacket(state, buffer.readDouble());
     }
 
     static void handle(AnimationStatePacket packet, Supplier<NetworkEvent.Context> supplier) {
@@ -63,7 +66,7 @@ public record AnimationStatePacket(SyncedAnimationState state, long serverTickAt
         private static void receive(AnimationStatePacket packet) {
             org.lytharalab.gfbs.gltf.client.sync.ClientAnimationSync.receive(
                 packet.state,
-                packet.serverTickAtSend
+                packet.sentAtSeconds
             );
         }
     }
