@@ -92,6 +92,8 @@ Reimagined r5.6.1 and Oculus 1.7.0/Embeddium 0.3.28/Complementary Reimagined r5.
 - Color and shadow dispatch callbacks, rendered screenshots, and shadow-toggle receiver changes.
 - Exact native LabPBR normal/specular GPU pixels before and after resource reload.
 - A non-square 4×2 packed specular image, categorical last mip, and sampler state across reload.
+- Generated static block/item atlas sprites, upright and `flip_v` variants, companion channel
+  pixels, and Oculus block-atlas normal/specular pixels.
 - A resolved Oculus entity-shadow frustum adapter with its opt-in enabled.
 - Generated glTF companion pixels, including metal ID 255.
 - View-space camera-frustum selection after camera rotation.

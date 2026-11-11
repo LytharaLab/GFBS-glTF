@@ -1,6 +1,6 @@
 # GFBS: glTF plugin development
 
-GFBS: glTF 1.5 provides a dependency-aware plugin host and typed extension registry. A plugin is a
+GFBS: glTF 1.6 provides a dependency-aware plugin host and typed extension registry. A plugin is a
 logical component, not a JAR boundary: a normal Forge mod may publish one plugin or several plugins
 from the same JAR.
 
@@ -12,7 +12,7 @@ A standalone plugin is an ordinary Forge 1.20.1 mod. Declare GFBS: glTF as a man
 [[dependencies.example_neon]]
 modId = "gfbs_gltf"
 mandatory = true
-versionRange = "[1.5.0,2.0.0)"
+versionRange = "[1.6.0,2.0.0)"
 ordering = "AFTER"
 side = "CLIENT"
 ```

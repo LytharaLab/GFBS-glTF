@@ -134,16 +134,19 @@ Native map pixels preserve the LabPBR channel layout.
 These channels integrate with entity rendering and static Forge block/item models. Embedded static
 materials automatically generate atlas sprites and `_n`/`_s` companions. Explicit Forge texture
 slots retain priority. Static `pbr_bake` accepts `page_size`, `chart_size`, and `max_pixels`.
+`flip_v` selects the V orientation baked into the generated sprites; upright and flipped variants
+use separate atlas entries.
 
 | Texture | R | G | B | A |
 | --- | --- | --- | --- | --- |
 | Normal | Tangent normal X | Tangent normal Y in DirectX convention | Material AO | Height |
 | Specular | Perceptual smoothness | Linear dielectric F0 or metal ID | Porosity or SSS | Emission |
 
-Specular sampling uses nearest filtering. Its mip generation preserves dielectric/metal,
-porosity/SSS, and emission-sentinel categories. Non-square mip chains keep each dimension at least
-one pixel. Iris owns the companions returned to each PBR holder, and creates fresh holders during
-resource or shader reload.
+In the entity/Iris companion path, specular sampling uses nearest filtering and mip generation
+preserves dielectric/metal, porosity/SSS, and emission-sentinel categories; non-square mip chains
+keep each dimension at least one pixel. Static block/item companion pages are stitched and
+mipmapped by Iris/Oculus together with the block atlas. Iris owns the companions returned to each
+PBR holder, and creates fresh holders during resource or shader reload.
 
 GFBS supplies channel data. Enable the shader pack's LabPBR profile or an appropriate resource-pack
 `optifine/texture.properties` format. Porosity, SSS, POM, AO, hardcoded metals, and emission

@@ -5,7 +5,8 @@
 ### Rendering and materials
 
 - Complete eight scalar LabPBR channels, sparse overrides, independent-UV triangle-chart baking,
-  optional compatible emission packing, and embedded static block/item atlas companions.
+  optional compatible emission packing, and embedded static block/item atlas companions with
+  independent upright/`flip_v` variants.
 - Route active Iris/Oculus color and shadow draws through the supplied entity buffers, including
   native triangle tangents, entity IDs, and pipeline render phases.
 - Use Minecraft's opaque transparency state for correct Iris buffer classification.

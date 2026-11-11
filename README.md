@@ -340,7 +340,9 @@ executed on this path.
 
 Embedded glTF materials automatically generate atlas sprites with LabPBR companions. Explicit
 `material_textures`, `material_0`, material-name and `texture` slots override generated materials.
-The API guide documents every option.
+Set `flip_v` when the exporter's V axis needs mirroring; the generated base, `_n`, and `_s` sprites
+follow that orientation and upright/flipped variants remain distinct. The API guide documents every
+option.
 
 See the [GFBS: glTF 1.x API guide](docs/1.x-API.md) for loading, animation, rendering, synchronization, node state, material variants, importers, culling, RenderTypes, collision, and migration details.
 
