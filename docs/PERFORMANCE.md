@@ -102,10 +102,9 @@ Reimagined r5.6.1 and Oculus 1.7.0/Embeddium 0.3.28/Complementary Reimagined r5.
 - Regression tests for matrix ownership, writable legacy poses, configurable import limits, and
   LabPBR channel/mipmap categories.
 
-Normal project verification uses `./gradlew build`.
-
-The 1.6.0 release JAR was also exercised in controlled Forge client runs; re-run equivalent client
-acceptance after changing atlas, material, or scene-preparation code.
+Normal project verification uses `./gradlew build`. The 1.6.0 release JAR was also exercised in
+controlled Forge client runs; re-run equivalent client acceptance after changing atlas, material,
+or scene-preparation code.
 
 ## Workload limits
 
