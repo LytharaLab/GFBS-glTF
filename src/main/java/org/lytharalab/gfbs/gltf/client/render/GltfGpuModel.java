@@ -1,624 +1,228 @@
 package org.lytharalab.gfbs.gltf.client.render;
 
-import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.systems.RenderSystem;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.resources.ResourceLocation;
-import org.lwjgl.opengl.GL11C;
-import org.lwjgl.opengl.GL13C;
-import org.lwjgl.opengl.GL30C;
-import org.lwjgl.stb.STBImage;
-import org.lwjgl.system.MemoryStack;
-import org.lwjgl.system.MemoryUtil;
 import org.lytharalab.gfbs.gltf.GFBSglTF;
-import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveKey;
+import org.lytharalab.gfbs.gltf.api.client.GltfRenderOptions;
+import org.lytharalab.gfbs.gltf.api.client.material.GltfPbrBakeOptions;
 import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
+import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
+import org.lytharalab.gfbs.gltf.api.model.GltfAssetAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
 import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
-import org.lytharalab.gfbs.gltf.api.model.GltfTexture;
-import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveKey;
+import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.IntBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Shared GPU cache for one immutable glTF asset. Textures and rigid geometry live here so every
- * runtime instance reuses the same resident resources; dynamic skin/morph geometry falls back to
- * the compatibility CPU pipeline.
- */
+/** GPU resources and draw topology shared by all instances of an immutable asset. */
 final class GltfGpuModel {
-    private static final AtomicLong NEXT_RUNTIME_ID = new AtomicLong();
-    private static final int MAX_TEXTURE_DIMENSION = 8192;
-    private static final long MAX_TOTAL_TEXTURE_PIXELS = 64L * 1024L * 1024L;
+    static final List<GltfMaterialBaker.Page> ORIGINAL_UV = java.util.Collections.singletonList(null);
+    private static final long GEOMETRY_BUDGET = 128L * 1024 * 1024;
+    private static final int MAX_GEOMETRY_ENTRIES = 4096;
+    private static final int COLD_FRAMES = 180;
+    private static final Map<GltfAsset, PreparedAsset> PREPARED = new WeakHashMap<>();
     final GltfAsset asset;
-    final List<ResourceLocation> textures = new ArrayList<>();
-    private final List<ResourceLocation> maskTextures = new ArrayList<>();
-    private final List<ResourceLocation> materialTextures = new ArrayList<>();
-    private final List<GltfMaterialTexture> materialTextureObjects = new ArrayList<>();
-    private final Map<GltfMaterial, Integer> originalMaterialIndices = new IdentityHashMap<>();
-    private final Map<GltfMaterial, ResourceLocation> runtimeMaskTextures = new IdentityHashMap<>();
-    private final Map<GltfMaterial, ResourceLocation> runtimeMaterialTextures = new IdentityHashMap<>();
-    private final Map<GltfMaterial, GltfMaterialTexture> runtimeMaterialTextureObjects = new IdentityHashMap<>();
-    private final ScenePlan[] scenePlans;
-    private final String runtimeId = Long.toUnsignedString(NEXT_RUNTIME_ID.incrementAndGet(), 36);
-    private ResourceLocation whiteTexture;
-    private boolean pbrUploaded;
-    private boolean pbrAvailable;
-    private boolean deleted;
+    final boolean hasEmission;
+    private final GltfGpuTextures textures;
+    private final PreparedAsset prepared;
+    private final Map<GeometryKey, Geometry> geometry = new LinkedHashMap<>(64, 0.75f, true);
+    private long geometryBytes;
+    long lastFrame = GltfGpuCache.frame();
 
     GltfGpuModel(GltfAsset asset) {
-        RenderSystem.assertOnRenderThread();
         this.asset = asset;
-        this.scenePlans = compileScenePlans(asset);
-        for (int index = 0; index < asset.materials().size(); index++) {
-            originalMaterialIndices.put(asset.materials().get(index), index);
-        }
-        try {
-            uploadTextures();
-            uploadWhiteTexture();
-            for (int index = 0; index < asset.materials().size(); index++) {
-                maskTextures.add(null);
-            }
-        } catch (RuntimeException | Error failure) {
-            try {
-                delete();
-            } catch (RuntimeException | Error cleanupFailure) {
-                failure.addSuppressed(cleanupFailure);
-            }
-            throw failure;
-        }
+        hasEmission = asset.materials().stream().anyMatch(GltfGeometryPipeline::hasVisibleEmission);
+        textures = new GltfGpuTextures(asset);
+        prepared = prepared(asset);
     }
 
     ScenePlan scenePlan(int scene) {
-        return scenePlans[scene];
+        return prepared.scenes.computeIfAbsent(scene, index -> compileScenePlan(asset, index));
+    }
+
+    static void prepareScene(GltfAsset asset, int scene) {
+        PreparedAsset prepared = prepared(asset);
+        ScenePlan plan = prepared.scenes.computeIfAbsent(scene, index -> compileScenePlan(asset, index));
+        plan.index(asset);
+        for (NodePlan node : plan.nodes) {
+            for (PrimitivePlan part : node.primitives) {
+                prepared.sections(part.primitive);
+                GltfMaterial material = asset.materials().get(part.primitive.material());
+                if (prepared.materials.requiresCharts(part.primitive, material, false)) {
+                    prepared.materials.bake(part.primitive, material, GltfPbrBakeOptions.DEFAULT, false, false);
+                }
+            }
+        }
+    }
+
+    private static PreparedAsset prepared(GltfAsset asset) {
+        synchronized (PREPARED) {
+            return PREPARED.computeIfAbsent(asset, ignored -> new PreparedAsset(asset.textures()));
+        }
     }
 
     GltfGpuPrimitive geometry(PrimitivePlan plan, GltfMaterial material,
                               GltfGeometryPipeline.PassKind pass) {
-        RenderSystem.assertOnRenderThread();
-        boolean base = pass == GltfGeometryPipeline.PassKind.BASE;
-        Map<GltfMaterial, GltfGpuPrimitive> variants =
-            base ? plan.baseGeometry : plan.emissiveGeometry;
-        Map<GltfMaterial, Boolean> failed = base ? plan.failedBaseGeometry : plan.failedEmissiveGeometry;
-        GltfGpuPrimitive existing = variants.get(material);
-        if (existing != null) return existing;
-        if (failed.containsKey(material)) return null;
+        return geometry(plan, material, pass, null);
+    }
 
-        GltfGeometryPipeline.MaterialPass materialPass = base
-            ? GltfGeometryPipeline.MaterialPass.base(material, 1.0f, 1.0f, 1.0f)
-            : GltfGeometryPipeline.MaterialPass.emissiveGpu(material);
+    GltfPrimitiveClusters.Section[] sections(GltfPrimitive primitive) {
+        return prepared.sections(primitive);
+    }
+
+    GltfGpuPrimitive geometry(PrimitivePlan plan, GltfMaterial material,
+                              GltfGeometryPipeline.PassKind pass, GltfPrimitiveClusters.Section section) {
+        boolean emissive = pass == GltfGeometryPipeline.PassKind.EMISSIVE;
+        GeometryKey key = emissive
+            ? new GeometryKey(plan.primitive, section, pass, material.emissiveTextureInfo(), material.emissiveRed(),
+                material.emissiveGreen(), material.emissiveBlue(), 1.0f, AlphaMode.OPAQUE)
+            : new GeometryKey(plan.primitive, section, pass, material.baseColorTextureInfo(), material.baseColorRed(),
+                material.baseColorGreen(), material.baseColorBlue(), material.baseColorAlpha(), material.alphaMode());
+        Geometry cached = geometry.get(key);
+        if (cached != null) {
+            cached.lastFrame = GltfGpuCache.frame();
+            return cached.buffer;
+        }
+
+        long bytes = section == null ? GltfGpuPrimitive.estimatedBytes(plan.primitive)
+            : (long) section.vertices() * org.lytharalab.gfbs.gltf.api.client.GltfRenderTypes.REQUIRED_FORMAT.getVertexSize();
+        if (bytes > GEOMETRY_BUDGET) return null;
+        // A scene larger than the resident budget can keep its already resident hot meshes while
+        // streaming the excess. Avoid destroying freshly used buffers and reuploading every frame.
+        if (geometry.size() >= MAX_GEOMETRY_ENTRIES || geometryBytes + bytes > GEOMETRY_BUDGET
+            || !GltfGpuCache.hasGeometrySpace(bytes)) return null;
+        GltfGeometryPipeline.MaterialPass materialPass = emissive
+            ? GltfGeometryPipeline.MaterialPass.emissiveGpu(material)
+            : GltfGeometryPipeline.MaterialPass.base(material, 1.0f, 1.0f, 1.0f);
         try {
-            GltfGpuPrimitive compiled = GltfGpuPrimitive.compile(
-                plan.primitive, material, materialPass
-            );
-            variants.put(material, compiled);
+            GltfGpuPrimitive compiled = GltfGpuPrimitive.compile(plan.primitive, material, materialPass, section);
+            geometry.put(key, new Geometry(compiled, bytes));
+            geometryBytes += bytes;
+            GltfGpuCache.geometryAllocated(bytes);
             return compiled;
         } catch (RuntimeException failure) {
-            failed.put(material, Boolean.TRUE);
-            GFBSglTF.LOGGER.warn(
-                "Falling back to streamed glTF geometry for {} node {} mesh {} primitive {} ({})",
-                asset.id(), plan.nodeIndex, plan.meshIndex, plan.primitiveIndex, pass, failure
-            );
+            geometry.put(key, new Geometry(null, 0));
+            GFBSglTF.LOGGER.warn("Streaming glTF geometry after GPU upload failed for {} mesh {} primitive {}",
+                asset.id(), plan.meshIndex, plan.primitiveIndex, failure);
             return null;
         }
     }
 
-    private static ScenePlan[] compileScenePlans(GltfAsset asset) {
-        ScenePlan[] result = new ScenePlan[asset.scenes().size()];
-        for (int sceneIndex = 0; sceneIndex < result.length; sceneIndex++) {
-            List<NodePlan> nodes = new ArrayList<>();
-            for (int root : asset.scenes().get(sceneIndex).roots()) {
-                compileNodePlan(asset, root, nodes);
+    private static ScenePlan compileScenePlan(GltfAsset asset, int scene) {
+        List<NodePlan> nodes = new ArrayList<>();
+        ArrayDeque<Integer> pending = new ArrayDeque<>();
+        int[] roots = asset.scenes().get(scene).roots();
+        for (int i = roots.length - 1; i >= 0; i--) pending.push(roots[i]);
+        while (!pending.isEmpty()) {
+            int index = pending.pop();
+            if (index < 0) {
+                nodes.get(~index).subtreeEndExclusive = nodes.size();
+                continue;
             }
-            result[sceneIndex] = new ScenePlan(nodes.toArray(NodePlan[]::new));
-        }
-        return result;
-    }
-
-    private static void compileNodePlan(GltfAsset asset, int nodeIndex, List<NodePlan> output) {
-        GltfNode node = asset.nodes().get(nodeIndex);
-        List<PrimitivePlan> primitives = new ArrayList<>();
-        int[] meshIndices = node.meshes();
-        for (int meshIndex : meshIndices) {
-            GltfMesh mesh = asset.meshes().get(meshIndex);
-            for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
-                primitives.add(new PrimitivePlan(
-                    nodeIndex, node.name(), meshIndex, primitiveIndex, mesh,
-                    mesh.primitives().get(primitiveIndex),
-                    new GltfPrimitiveKey(nodeIndex, meshIndex, primitiveIndex)
-                ));
-            }
-        }
-        NodePlan plan = new NodePlan(
-            nodeIndex, node, primitives.toArray(PrimitivePlan[]::new)
-        );
-        output.add(plan);
-        for (int child : node.children()) compileNodePlan(asset, child, output);
-        plan.subtreeEndExclusive = output.size();
-    }
-
-    ResourceLocation materialTexture(GltfMaterial material, boolean shaderPackActive) {
-        if (shaderPackActive && OculusCompat.installed()) {
-            ensurePbrTextures();
-            if (pbrAvailable) {
-                Integer original = originalMaterialIndices.get(material);
-                return original == null
-                    ? runtimeMaterialTexture(material)
-                    : materialTextures.get(original);
-            }
-        }
-        if (material.alphaMode() == AlphaMode.MASK) {
-            return maskTexture(material);
-        }
-        return material.baseColorTexture() < 0
-            ? whiteTexture
-            : textures.get(material.baseColorTexture());
-    }
-
-    ResourceLocation emissiveTexture(GltfMaterial material) {
-        return material.emissiveTexture() < 0
-            ? whiteTexture
-            : textures.get(material.emissiveTexture());
-    }
-
-    private void ensurePbrTextures() {
-        if (pbrUploaded) return;
-        RenderSystem.assertOnRenderThread();
-        if (!OculusPbrTextureBridge.install()) {
-            pbrUploaded = true;
-            pbrAvailable = false;
-            return;
-        }
-        try {
-            uploadMaterialTextures();
-            pbrUploaded = true;
-            pbrAvailable = true;
-        } catch (RuntimeException | Error failure) {
-            clearMaterialTextures();
-            throw failure;
-        }
-    }
-
-    private ResourceLocation maskTexture(int materialIndex) {
-        ResourceLocation existing = maskTextures.get(materialIndex);
-        if (existing != null) return existing;
-        RenderSystem.assertOnRenderThread();
-        GltfMaterial material = asset.materials().get(materialIndex);
-        NativeImage image = null;
-        DynamicTexture dynamic = null;
-        ResourceLocation location = null;
-        boolean registered = false;
-        boolean committed = false;
-        try {
-            image = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
-            applyAlphaMask(image, material);
-            dynamic = new DynamicTexture(image);
-            image = null;
-            GltfTexture sampler = material.baseColorTexture() < 0
-                ? null : asset.textures().get(material.baseColorTexture());
-            location = runtimeLocation("mask/" + materialIndex);
-            Minecraft.getInstance().getTextureManager().register(location, dynamic);
-            registered = true;
-            configureSampler(dynamic, sampler);
-            maskTextures.set(materialIndex, location);
-            committed = true;
-            return location;
-        } catch (IOException exception) {
-            throw new IllegalArgumentException(
-                "Invalid base-color texture for masked material " + materialIndex
-                    + " in " + asset.id(),
-                exception
-            );
-        } finally {
-            if (image != null) image.close();
-            if (!committed) {
-                if (registered && location != null) {
-                    Minecraft.getInstance().getTextureManager().release(location);
-                } else if (dynamic != null) {
-                    dynamic.close();
+            GltfNode node = asset.nodes().get(index);
+            List<PrimitivePlan> primitives = new ArrayList<>();
+            for (int slot = 0; slot < node.meshCount(); slot++) {
+                int meshIndex = node.mesh(slot);
+                GltfMesh mesh = asset.meshes().get(meshIndex);
+                for (int i = 0; i < mesh.primitives().size(); i++) {
+                    primitives.add(new PrimitivePlan(index, node.name(), meshIndex, i, mesh,
+                        mesh.primitives().get(i), new GltfPrimitiveKey(index, meshIndex, i)));
                 }
             }
+            pending.push(~nodes.size());
+            for (int i = node.childCount() - 1; i >= 0; i--) pending.push(node.child(i));
+            nodes.add(new NodePlan(index, node, primitives.toArray(PrimitivePlan[]::new)));
         }
+        return new ScenePlan(nodes.toArray(NodePlan[]::new));
     }
 
-    private ResourceLocation maskTexture(GltfMaterial material) {
-        Integer original = originalMaterialIndices.get(material);
-        if (original != null) return maskTexture(original);
-        ResourceLocation existing = runtimeMaskTextures.get(material);
-        if (existing != null) return existing;
-        RenderSystem.assertOnRenderThread();
-        NativeImage image = null;
-        DynamicTexture dynamic = null;
-        ResourceLocation location = null;
-        boolean registered = false;
-        boolean committed = false;
-        try {
-            image = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
-            applyAlphaMask(image, material);
-            dynamic = new DynamicTexture(image);
-            image = null;
-            GltfTexture sampler = material.baseColorTexture() < 0
-                ? null : asset.textures().get(material.baseColorTexture());
-            location = runtimeLocation("mask/variant/" + runtimeMaskTextures.size());
-            Minecraft.getInstance().getTextureManager().register(location, dynamic);
-            registered = true;
-            configureSampler(dynamic, sampler);
-            runtimeMaskTextures.put(material, location);
-            committed = true;
-            return location;
-        } catch (IOException exception) {
-            throw new IllegalArgumentException("Invalid runtime masked material in " + asset.id(), exception);
-        } finally {
-            if (image != null) image.close();
-            if (!committed) {
-                if (registered && location != null) Minecraft.getInstance().getTextureManager().release(location);
-                else if (dynamic != null) dynamic.close();
-            }
+    ResourceLocation materialTexture(GltfMaterial material, boolean shaderPack) {
+        return textures.base(material, shaderPack);
+    }
+
+    ResourceLocation materialTexture(GltfMaterial material, boolean shaderPack, GltfMaterialBaker.Page page) {
+        return textures.base(material, shaderPack, page);
+    }
+
+    List<GltfMaterialBaker.Page> materialPages(GltfPrimitive primitive, GltfMaterial material,
+                                               boolean shaderPack, GltfRenderOptions options) {
+        if (!shaderPack || !OculusPbrTextureBridge.install()) return ORIGINAL_UV;
+        if (!options.labPbrEmission() && !prepared.materials.requiresCharts(primitive, material, false)) return ORIGINAL_UV;
+        return prepared.materials.bake(primitive, material, options.pbrBakeOptions(), false, options.labPbrEmission()).pages();
+    }
+
+    GltfTextureInfo materialUv(GltfMaterial material, boolean shaderPack) {
+        return textures.baseUv(material, shaderPack);
+    }
+
+    ResourceLocation emissiveTexture(GltfMaterial material) { return textures.emissive(material); }
+
+    void releaseCold(long frame) {
+        var entries = geometry.values().iterator();
+        while (entries.hasNext()) {
+            Geometry entry = entries.next();
+            if (frame - entry.lastFrame <= COLD_FRAMES) continue;
+            entries.remove();
+            geometryBytes -= entry.bytes;
+            GltfGpuCache.geometryAllocated(-entry.bytes);
+            if (entry.buffer != null) entry.buffer.close();
         }
-    }
-
-    private void uploadWhiteTexture() {
-        NativeImage image = new NativeImage(1, 1, true);
-        image.setPixelRGBA(0, 0, 0xffffffff);
-        DynamicTexture dynamic = new DynamicTexture(image);
-        whiteTexture = runtimeLocation("white");
-        Minecraft.getInstance().getTextureManager().register(whiteTexture, dynamic);
-    }
-
-    private void uploadTextures() {
-        long totalPixels = 0L;
-        int hardwareLimit = GL11C.glGetInteger(GL11C.GL_MAX_TEXTURE_SIZE);
-        int dimensionLimit = Math.min(MAX_TEXTURE_DIMENSION, Math.max(1, hardwareLimit));
-        for (int index = 0; index < asset.textures().size(); index++) {
-            GltfTexture texture = asset.textures().get(index);
-            NativeImage image = null;
-            DynamicTexture dynamic = null;
-            ResourceLocation location = null;
-            boolean registered = false;
-            boolean committed = false;
-            ByteBuffer encoded = MemoryUtil.memAlloc(texture.encodedImageSize());
-            try {
-                encoded.put(texture.encodedImage()).flip();
-                ImageInfo info = inspectImage(encoded, index);
-                if (info.width > dimensionLimit || info.height > dimensionLimit) {
-                    throw new IllegalArgumentException("Texture " + index + " in " + asset.id()
-                        + " is " + info.width + "x" + info.height
-                        + "; maximum supported dimension is " + dimensionLimit);
-                }
-                totalPixels = Math.addExact(totalPixels, Math.multiplyExact((long) info.width, info.height));
-                if (totalPixels > MAX_TOTAL_TEXTURE_PIXELS) {
-                    throw new IllegalArgumentException("Decoded textures in " + asset.id()
-                        + " exceed the 64 Mi-pixel safety budget");
-                }
-                image = NativeImage.read(encoded);
-                dynamic = new DynamicTexture(image);
-                image = null;
-                dynamic.setFilter(texture.magFilter() == 9729, usesMipmaps(texture.minFilter()));
-                location = runtimeLocation("texture/" + index);
-                Minecraft.getInstance().getTextureManager().register(location, dynamic);
-                registered = true;
-                RenderSystem.activeTexture(GL13C.GL_TEXTURE0);
-                RenderSystem.bindTexture(dynamic.getId());
-                GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_MAG_FILTER, texture.magFilter());
-                GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_MIN_FILTER, texture.minFilter());
-                GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_WRAP_S, texture.wrapS());
-                GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_WRAP_T, texture.wrapT());
-                if (usesMipmaps(texture.minFilter())) GL30C.glGenerateMipmap(GL11C.GL_TEXTURE_2D);
-                textures.add(location);
-                committed = true;
-            } catch (IOException exception) {
-                throw new IllegalArgumentException("Invalid image " + index + " in " + asset.id(), exception);
-            } finally {
-                MemoryUtil.memFree(encoded);
-                if (image != null) image.close();
-                if (!committed) {
-                    if (registered && location != null) {
-                        Minecraft.getInstance().getTextureManager().release(location);
-                    } else if (dynamic != null) {
-                        dynamic.close();
-                    }
-                }
-            }
-        }
-    }
-
-    private void uploadMaterialTextures() {
-        for (int materialIndex = 0; materialIndex < asset.materials().size(); materialIndex++) {
-            GltfMaterial material = asset.materials().get(materialIndex);
-            NativeImage base = null;
-            NativeImage normal = null;
-            NativeImage occlusion = null;
-            NativeImage metallicRoughness = null;
-            GltfMaterialTexture materialTexture = null;
-            boolean committed = false;
-            try {
-                base = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
-                if (material.alphaMode() == AlphaMode.MASK) applyAlphaMask(base, material);
-                normal = decodeOptional(material.normalTexture());
-                occlusion = decodeOptional(material.occlusionTexture());
-                metallicRoughness = decodeOptional(material.metallicRoughnessTexture());
-                materialTexture = new GltfMaterialTexture(
-                    base,
-                    createLabPbrNormal(base, normal, occlusion, material),
-                    createLabPbrSpecular(base, metallicRoughness, material)
-                );
-                base = null;
-                materialTexture.setFilter(true, true);
-                materialTexture.normalTexture().setFilter(true, true);
-                materialTexture.specularTexture().setFilter(true, true);
-                ResourceLocation location = runtimeLocation("material/" + materialIndex);
-                Minecraft.getInstance().getTextureManager().register(location, materialTexture);
-                materialTextures.add(location);
-                materialTextureObjects.add(materialTexture);
-                committed = true;
-            } catch (IOException exception) {
-                throw new IllegalArgumentException(
-                    "Invalid PBR texture for material " + materialIndex + " in " + asset.id(),
-                    exception
-                );
-            } finally {
-                if (base != null) base.close();
-                if (normal != null) normal.close();
-                if (occlusion != null) occlusion.close();
-                if (metallicRoughness != null) metallicRoughness.close();
-                if (!committed && materialTexture != null) {
-                    materialTexture.closeCompanions();
-                    materialTexture.close();
-                }
-            }
-        }
-    }
-
-    private ResourceLocation runtimeMaterialTexture(GltfMaterial material) {
-        ResourceLocation existing = runtimeMaterialTextures.get(material);
-        if (existing != null) return existing;
-        RenderSystem.assertOnRenderThread();
-        NativeImage base = null;
-        NativeImage normal = null;
-        NativeImage occlusion = null;
-        NativeImage metallicRoughness = null;
-        GltfMaterialTexture materialTexture = null;
-        ResourceLocation location = null;
-        boolean registered = false;
-        boolean committed = false;
-        try {
-            base = decodeOrSolid(material.baseColorTexture(), 0xffffffff);
-            if (material.alphaMode() == AlphaMode.MASK) applyAlphaMask(base, material);
-            normal = decodeOptional(material.normalTexture());
-            occlusion = decodeOptional(material.occlusionTexture());
-            metallicRoughness = decodeOptional(material.metallicRoughnessTexture());
-            materialTexture = new GltfMaterialTexture(
-                base,
-                createLabPbrNormal(base, normal, occlusion, material),
-                createLabPbrSpecular(base, metallicRoughness, material)
-            );
-            base = null;
-            materialTexture.setFilter(true, true);
-            materialTexture.normalTexture().setFilter(true, true);
-            materialTexture.specularTexture().setFilter(true, true);
-            location = runtimeLocation("material/variant/" + runtimeMaterialTextures.size());
-            Minecraft.getInstance().getTextureManager().register(location, materialTexture);
-            registered = true;
-            runtimeMaterialTextures.put(material, location);
-            runtimeMaterialTextureObjects.put(material, materialTexture);
-            committed = true;
-            return location;
-        } catch (IOException exception) {
-            throw new IllegalArgumentException("Invalid runtime PBR material in " + asset.id(), exception);
-        } finally {
-            if (base != null) base.close();
-            if (normal != null) normal.close();
-            if (occlusion != null) occlusion.close();
-            if (metallicRoughness != null) metallicRoughness.close();
-            if (!committed && materialTexture != null) {
-                materialTexture.closeCompanions();
-                if (registered && location != null) Minecraft.getInstance().getTextureManager().release(location);
-                else materialTexture.close();
-            }
-        }
-    }
-
-    private NativeImage decodeOrSolid(int textureIndex, int rgba) throws IOException {
-        NativeImage image = decodeOptional(textureIndex);
-        if (image != null) return image;
-        image = new NativeImage(1, 1, true);
-        image.setPixelRGBA(0, 0, rgba);
-        return image;
-    }
-
-    private NativeImage decodeOptional(int textureIndex) throws IOException {
-        if (textureIndex < 0) return null;
-        GltfTexture texture = asset.textures().get(textureIndex);
-        ByteBuffer encoded = MemoryUtil.memAlloc(texture.encodedImageSize());
-        try {
-            encoded.put(texture.encodedImage()).flip();
-            return NativeImage.read(encoded);
-        } finally {
-            MemoryUtil.memFree(encoded);
-        }
-    }
-
-    private static void applyAlphaMask(NativeImage image, GltfMaterial material) {
-        float factorAlpha = material.baseColorAlpha();
-        for (int y = 0; y < image.getHeight(); y++) {
-            for (int x = 0; x < image.getWidth(); x++) {
-                int source = image.getPixelRGBA(x, y);
-                float alpha = (source >>> 24 & 255) / 255.0f * factorAlpha;
-                int maskedAlpha = alpha >= material.alphaCutoff() ? 255 : 0;
-                image.setPixelRGBA(x, y, source & 0x00ffffff | maskedAlpha << 24);
-            }
-        }
-    }
-
-    private static void configureSampler(DynamicTexture dynamic, GltfTexture sampler) {
-        if (sampler == null) {
-            dynamic.setFilter(false, false);
-            return;
-        }
-        dynamic.setFilter(sampler.magFilter() == 9729, usesMipmaps(sampler.minFilter()));
-        RenderSystem.activeTexture(GL13C.GL_TEXTURE0);
-        RenderSystem.bindTexture(dynamic.getId());
-        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_MAG_FILTER, sampler.magFilter());
-        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_MIN_FILTER, sampler.minFilter());
-        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_WRAP_S, sampler.wrapS());
-        GL11C.glTexParameteri(GL11C.GL_TEXTURE_2D, GL11C.GL_TEXTURE_WRAP_T, sampler.wrapT());
-        if (usesMipmaps(sampler.minFilter())) GL30C.glGenerateMipmap(GL11C.GL_TEXTURE_2D);
-    }
-
-    private ResourceLocation runtimeLocation(String suffix) {
-        return ResourceLocation.fromNamespaceAndPath(
-            "gfbs_gltf", "runtime/" + runtimeId + "/" + suffix
-        );
-    }
-
-    private static NativeImage createLabPbrNormal(NativeImage base, NativeImage normal,
-                                                   NativeImage occlusion, GltfMaterial material) {
-        int width = normal == null ? base.getWidth() : normal.getWidth();
-        int height = normal == null ? base.getHeight() : normal.getHeight();
-        NativeImage output = new NativeImage(width, height, true);
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int source = normal == null ? rgba(128, 128, 255, 255)
-                    : sample(normal, x, y, width, height);
-                float normalX = (red(source) / 127.5f - 1.0f) * material.normalScale();
-                float normalY = (green(source) / 127.5f - 1.0f) * material.normalScale();
-                float length = Math.max(1.0f, (float) Math.sqrt(normalX * normalX + normalY * normalY));
-                normalX /= length;
-                normalY /= length;
-                int ambientOcclusion = occlusion == null ? 255 : channel(mix(
-                    1.0f,
-                    red(sample(occlusion, x, y, width, height)) / 255.0f,
-                    material.occlusionStrength()
-                ));
-                output.setPixelRGBA(x, y, rgba(
-                    channel(normalX * 0.5f + 0.5f),
-                    channel(normalY * 0.5f + 0.5f),
-                    ambientOcclusion,
-                    255
-                ));
-            }
-        }
-        return output;
-    }
-
-    private static NativeImage createLabPbrSpecular(NativeImage base,
-                                                     NativeImage metallicRoughness,
-                                                     GltfMaterial material) {
-        int width = metallicRoughness == null ? base.getWidth() : metallicRoughness.getWidth();
-        int height = metallicRoughness == null ? base.getHeight() : metallicRoughness.getHeight();
-        NativeImage output = new NativeImage(width, height, true);
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int pbr = metallicRoughness == null ? 0xffffffff
-                    : sample(metallicRoughness, x, y, width, height);
-                int smoothness = channel(
-                    1.0f - material.roughnessFactor() * green(pbr) / 255.0f
-                );
-                float metallic = material.metallicFactor() * blue(pbr) / 255.0f;
-                int reflectance = Math.round(12.0f + metallic * (255.0f - 12.0f));
-                output.setPixelRGBA(x, y, rgba(
-                    smoothness,
-                    reflectance,
-                    0,
-                    0
-                ));
-            }
-        }
-        return output;
-    }
-
-    private static int sample(NativeImage image, int x, int y, int width, int height) {
-        return image.getPixelRGBA(
-            Math.min(image.getWidth() - 1, x * image.getWidth() / Math.max(1, width)),
-            Math.min(image.getHeight() - 1, y * image.getHeight() / Math.max(1, height))
-        );
-    }
-
-    private static ImageInfo inspectImage(ByteBuffer encoded, int index) {
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            IntBuffer width = stack.mallocInt(1);
-            IntBuffer height = stack.mallocInt(1);
-            IntBuffer channels = stack.mallocInt(1);
-            if (!STBImage.stbi_info_from_memory(encoded.duplicate(), width, height, channels)) {
-                throw new IllegalArgumentException("Invalid image " + index + ": " + STBImage.stbi_failure_reason());
-            }
-            if (width.get(0) <= 0 || height.get(0) <= 0) {
-                throw new IllegalArgumentException("Image " + index + " has invalid dimensions");
-            }
-            return new ImageInfo(width.get(0), height.get(0));
-        }
+        textures.releaseCold(frame);
     }
 
     void delete() {
         RenderSystem.assertOnRenderThread();
-        if (deleted) return;
-        deleted = true;
-        for (ScenePlan scene : scenePlans) {
-            for (NodePlan node : scene.nodes) {
-                for (PrimitivePlan primitive : node.primitives) primitive.closeGeometry();
-            }
+        for (Geometry entry : geometry.values()) {
+            if (entry.buffer != null) entry.buffer.close();
         }
-        for (ResourceLocation texture : textures) {
-            Minecraft.getInstance().getTextureManager().release(texture);
-        }
-        textures.clear();
-        for (ResourceLocation texture : maskTextures) {
-            if (texture != null) Minecraft.getInstance().getTextureManager().release(texture);
-        }
-        maskTextures.clear();
-        for (ResourceLocation texture : runtimeMaskTextures.values()) {
-            Minecraft.getInstance().getTextureManager().release(texture);
-        }
-        runtimeMaskTextures.clear();
-        if (whiteTexture != null) {
-            Minecraft.getInstance().getTextureManager().release(whiteTexture);
-            whiteTexture = null;
-        }
-        clearMaterialTextures();
-    }
-
-    private void clearMaterialTextures() {
-        for (int i = 0; i < materialTextures.size(); i++) {
-            materialTextureObjects.get(i).closeCompanions();
-            Minecraft.getInstance().getTextureManager().release(materialTextures.get(i));
-        }
-        materialTextures.clear();
-        materialTextureObjects.clear();
-        for (Map.Entry<GltfMaterial, ResourceLocation> entry : runtimeMaterialTextures.entrySet()) {
-            GltfMaterialTexture texture = runtimeMaterialTextureObjects.get(entry.getKey());
-            if (texture != null) texture.closeCompanions();
-            Minecraft.getInstance().getTextureManager().release(entry.getValue());
-        }
-        runtimeMaterialTextures.clear();
-        runtimeMaterialTextureObjects.clear();
-        pbrUploaded = false;
-        pbrAvailable = false;
-    }
-
-    private static boolean usesMipmaps(int filter) {
-        return filter == 9984 || filter == 9985 || filter == 9986 || filter == 9987;
-    }
-    private static float mix(float from, float to, float amount) { return from + (to - from) * amount; }
-    private static int channel(float value) { return Math.max(0, Math.min(255, Math.round(value * 255.0f))); }
-    private static int red(int rgba) { return rgba & 255; }
-    private static int green(int rgba) { return rgba >>> 8 & 255; }
-    private static int blue(int rgba) { return rgba >>> 16 & 255; }
-    private static int rgba(int red, int green, int blue, int alpha) {
-        return red | green << 8 | blue << 16 | alpha << 24;
+        geometry.clear();
+        GltfGpuCache.geometryAllocated(-geometryBytes);
+        geometryBytes = 0;
+        textures.close();
     }
 
     static final class ScenePlan {
+        private static final int INDEX_THRESHOLD = 64;
         final NodePlan[] nodes;
+        private volatile GltfSceneIndex spatialIndex;
+
         ScenePlan(NodePlan[] nodes) { this.nodes = nodes; }
+
+        GltfSceneIndex index(GltfAsset asset) {
+            if (nodes.length < INDEX_THRESHOLD) return null;
+            GltfSceneIndex index = spatialIndex;
+            if (index != null) return index;
+            synchronized (this) {
+                if (spatialIndex == null) {
+                    spatialIndex = new GltfSceneIndex(nodes, GltfAssetAccess.bindWorldMatrices(asset));
+                }
+                return spatialIndex;
+            }
+        }
+    }
+
+    private static final class PreparedAsset {
+        final Map<Integer, ScenePlan> scenes = new ConcurrentHashMap<>();
+        final Map<GltfPrimitive, GltfPrimitiveClusters.Section[]> clusters = new ConcurrentHashMap<>();
+        final GltfMaterialBaker materials;
+
+        PreparedAsset(List<org.lytharalab.gfbs.gltf.api.model.GltfTexture> textures) {
+            materials = new GltfMaterialBaker(textures);
+        }
+
+        GltfPrimitiveClusters.Section[] sections(GltfPrimitive primitive) {
+            return GltfPrimitiveClusters.eligible(primitive)
+                ? clusters.computeIfAbsent(primitive, GltfPrimitiveClusters::build) : GltfPrimitiveClusters.whole();
+        }
     }
 
     static final class NodePlan {
@@ -634,40 +238,23 @@ final class GltfGpuModel {
         }
     }
 
-    static final class PrimitivePlan {
-        final int nodeIndex;
-        final String nodeName;
-        final int meshIndex;
-        final int primitiveIndex;
-        final GltfMesh mesh;
-        final GltfPrimitive primitive;
-        final GltfPrimitiveKey key;
-        final Map<GltfMaterial, GltfGpuPrimitive> baseGeometry = new IdentityHashMap<>();
-        final Map<GltfMaterial, GltfGpuPrimitive> emissiveGeometry = new IdentityHashMap<>();
-        final Map<GltfMaterial, Boolean> failedBaseGeometry = new IdentityHashMap<>();
-        final Map<GltfMaterial, Boolean> failedEmissiveGeometry = new IdentityHashMap<>();
-
-        PrimitivePlan(int nodeIndex, String nodeName, int meshIndex, int primitiveIndex,
-                      GltfMesh mesh, GltfPrimitive primitive, GltfPrimitiveKey key) {
-            this.nodeIndex = nodeIndex;
-            this.nodeName = nodeName;
-            this.meshIndex = meshIndex;
-            this.primitiveIndex = primitiveIndex;
-            this.mesh = mesh;
-            this.primitive = primitive;
-            this.key = key;
-        }
-
-        void closeGeometry() {
-            for (GltfGpuPrimitive buffer : baseGeometry.values()) buffer.close();
-            for (GltfGpuPrimitive buffer : emissiveGeometry.values()) buffer.close();
-            baseGeometry.clear();
-            emissiveGeometry.clear();
-            failedBaseGeometry.clear();
-            failedEmissiveGeometry.clear();
-        }
+    record PrimitivePlan(int nodeIndex, String nodeName, int meshIndex, int primitiveIndex,
+                         GltfMesh mesh, GltfPrimitive primitive, GltfPrimitiveKey key) {
     }
 
-    private record ImageInfo(int width, int height) {
+    private record GeometryKey(GltfPrimitive primitive, GltfPrimitiveClusters.Section section,
+                               GltfGeometryPipeline.PassKind pass,
+                               GltfTextureInfo uv, float red, float green, float blue,
+                               float alpha, AlphaMode alphaMode) {}
+
+    private static final class Geometry {
+        final GltfGpuPrimitive buffer;
+        final long bytes;
+        long lastFrame = GltfGpuCache.frame();
+
+        Geometry(GltfGpuPrimitive buffer, long bytes) {
+            this.buffer = buffer;
+            this.bytes = bytes;
+        }
     }
 }

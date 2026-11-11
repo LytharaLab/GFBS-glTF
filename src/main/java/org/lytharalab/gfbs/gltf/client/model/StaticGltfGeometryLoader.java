@@ -60,7 +60,8 @@ public final class StaticGltfGeometryLoader
             optionalBoolean(json, "flip_v", false),
             optionalBoolean(json, "shade", true),
             optionalBoolean(json, "automatic_culling", false),
-            optionalStringMap(json, "material_textures")
+            optionalStringMap(json, "material_textures"),
+            GltfGeneratedMaterialPack.bakeOptions(json)
         );
         try {
             return new StaticGltfGeometry(asset, settings);
@@ -77,6 +78,15 @@ public final class StaticGltfGeometryLoader
     }
 
     private GltfAsset load(ResourceLocation location) {
+        GltfGeneratedMaterialPack generated = GltfGeneratedMaterialPack.current();
+        if (generated != null) {
+            try {
+                return generated.loadAsset(location);
+            } catch (Exception exception) {
+                throw new JsonParseException("Could not load static glTF model " + location + ": "
+                    + message(exception), exception);
+            }
+        }
         ResourceManager manager = resources;
         if (manager == null) {
             manager = Minecraft.getInstance().getResourceManager();

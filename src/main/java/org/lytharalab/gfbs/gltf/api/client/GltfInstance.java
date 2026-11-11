@@ -39,7 +39,10 @@ public final class GltfInstance implements AutoCloseable {
     public int scene() { return scene; }
     public void setScene(int scene) {
         if (scene < 0 || scene >= asset.scenes().size()) throw new IndexOutOfBoundsException("scene");
-        this.scene = scene;
+        if (this.scene != scene) {
+            this.scene = scene;
+            collision.markSelectionDirty();
+        }
     }
     /**
      * Returns whether a node and its subtree are enabled for rendering.
@@ -64,6 +67,16 @@ public final class GltfInstance implements AutoCloseable {
     }
     public void resetNodeVisibility() {
         for (var node : nodes.all()) node.subtreeVisible(true);
+    }
+
+    /** Gets the current model-space node transform as a defensive column-major matrix. */
+    public float[] nodeModelMatrix(int node) {
+        return nodes.modelMatrix(node, animations);
+    }
+
+    /** Replaces a node's current placement in model space, preserving its parent relationship. */
+    public void setNodeModelMatrix(int node, float[] matrix) {
+        nodes.setModelMatrix(node, animations, matrix);
     }
     /**
      * Advances every animation track and the collision shape by wall-clock seconds.

@@ -1,24 +1,38 @@
 package org.lytharalab.gfbs.gltf.client.render;
 
 import com.mojang.blaze3d.platform.NativeImage;
-import net.minecraft.client.renderer.texture.DynamicTexture;
+import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
+import org.lytharalab.gfbs.gltf.api.model.GltfTexture;
+import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
 
-/** Base texture with runtime-generated LabPBR companions consumed by Oculus. */
-final class GltfMaterialTexture extends DynamicTexture {
-    private final DynamicTexture normalTexture;
-    private final DynamicTexture specularTexture;
+/** Base image recognized by the Iris PBR registry. Iris owns each pair created by its loader. */
+final class GltfMaterialTexture extends GltfUploadedTexture {
+    private final GltfGpuTextures textures;
+    private final GltfMaterial material;
+    private final GltfTextureInfo anchor;
+    private final GltfMaterialBaker.Page page;
 
-    GltfMaterialTexture(NativeImage base, NativeImage normal, NativeImage specular) {
-        super(base);
-        this.normalTexture = new DynamicTexture(normal);
-        this.specularTexture = new DynamicTexture(specular);
+    GltfMaterialTexture(NativeImage image, GltfTexture sampler, GltfGpuTextures textures,
+                        GltfMaterial material, GltfTextureInfo anchor) {
+        super(image, sampler, false);
+        this.textures = textures;
+        this.material = material;
+        this.anchor = anchor;
+        this.page = null;
     }
 
-    DynamicTexture normalTexture() { return normalTexture; }
-    DynamicTexture specularTexture() { return specularTexture; }
+    GltfMaterialTexture(NativeImage image, GltfGpuTextures textures, GltfMaterialBaker.Page page) {
+        super(image, 9729, 9987, 33071, 33071, false, page.maxMip);
+        this.textures = textures;
+        this.page = page;
+        this.material = null;
+        this.anchor = null;
+    }
 
-    void closeCompanions() {
-        normalTexture.close();
-        specularTexture.close();
+    GltfUploadedTexture loadNormal() {
+        return page == null ? textures.companion(material, anchor, false) : textures.companion(page, 1);
+    }
+    GltfUploadedTexture loadSpecular() {
+        return page == null ? textures.companion(material, anchor, true) : textures.companion(page, 2);
     }
 }

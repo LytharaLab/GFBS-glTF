@@ -1,6 +1,7 @@
 package org.lytharalab.gfbs.gltf.api.model;
 
 import java.util.Arrays;
+import java.util.Objects;
 
 public final class GltfMaterial {
     private final String name;
@@ -18,6 +19,7 @@ public final class GltfMaterial {
     private final float alphaCutoff;
     private final boolean doubleSided;
     private final boolean unlit;
+    private final GltfLabPbr labPbr;
 
     public GltfMaterial(String name, float[] baseColor, int baseColorTexture,
                         int baseColorTexCoord, float[] emissive, int emissiveTexture,
@@ -91,6 +93,7 @@ public final class GltfMaterial {
         this.alphaCutoff = alphaCutoff;
         this.doubleSided = doubleSided;
         this.unlit = false;
+        this.labPbr = GltfLabPbr.DEFAULT;
     }
 
     public GltfMaterial(
@@ -111,6 +114,21 @@ public final class GltfMaterial {
         float alphaCutoff,
         boolean doubleSided,
         boolean unlit
+    ) {
+        this(name, baseColor, baseColorTexture, metallicFactor, roughnessFactor,
+            metallicRoughnessTexture, normalTexture, normalScale, occlusionTexture, occlusionStrength,
+            emissive, emissiveTexture, emissiveStrength, alphaMode, alphaCutoff, doubleSided, unlit,
+            GltfLabPbr.DEFAULT);
+    }
+
+    public GltfMaterial(
+        String name, float[] baseColor, GltfTextureInfo baseColorTexture,
+        float metallicFactor, float roughnessFactor, GltfTextureInfo metallicRoughnessTexture,
+        GltfTextureInfo normalTexture, float normalScale,
+        GltfTextureInfo occlusionTexture, float occlusionStrength,
+        float[] emissive, GltfTextureInfo emissiveTexture, float emissiveStrength,
+        AlphaMode alphaMode, float alphaCutoff, boolean doubleSided, boolean unlit,
+        GltfLabPbr labPbr
     ) {
         this.name = name == null ? "" : name;
         this.baseColor = copy(baseColor, 4, new float[]{1, 1, 1, 1}, "base color");
@@ -137,6 +155,7 @@ public final class GltfMaterial {
         this.alphaCutoff = alphaCutoff;
         this.doubleSided = doubleSided;
         this.unlit = unlit;
+        this.labPbr = Objects.requireNonNull(labPbr, "labPbr");
     }
 
     private static int texture(int value, String label) {
@@ -223,4 +242,11 @@ public final class GltfMaterial {
     public float alphaCutoff() { return alphaCutoff; }
     public boolean doubleSided() { return doubleSided; }
     public boolean unlit() { return unlit; }
+    public GltfLabPbr labPbr() { return labPbr; }
+
+    public GltfMaterial withLabPbr(GltfLabPbr value) {
+        return new GltfMaterial(name, baseColor, baseColorTexture, metallicFactor, roughnessFactor,
+            metallicRoughnessTexture, normalTexture, normalScale, occlusionTexture, occlusionStrength,
+            emissive, emissiveTexture, emissiveStrength, alphaMode, alphaCutoff, doubleSided, unlit, value);
+    }
 }

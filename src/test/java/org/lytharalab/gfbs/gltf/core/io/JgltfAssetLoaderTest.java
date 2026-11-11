@@ -3,6 +3,9 @@ package org.lytharalab.gfbs.gltf.core.io;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
+import org.lytharalab.gfbs.gltf.api.model.GltfLabPbr;
+import org.lytharalab.gfbs.gltf.api.io.GltfLoadLimits;
+import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
 import java.io.ByteArrayInputStream;
 import java.nio.ByteBuffer;
@@ -144,6 +147,47 @@ class JgltfAssetLoaderTest {
             if (id.equals(GLTF)) return new ByteArrayInputStream(json);
             return new ByteArrayInputStream(oversized);
         }));
+    }
+
+    @Test
+    void importsRigidMeshInstancesAsIndependentlyAddressableNodes() throws Exception {
+        byte[] binary = ByteBuffer.allocate(68).order(ByteOrder.LITTLE_ENDIAN)
+            .put(triangleBinary()).putFloat(4).putFloat(0).putFloat(0)
+            .putFloat(7).putFloat(0).putFloat(0).array();
+        String source = json("mesh.bin", binary.length)
+            .replace("\"nodes\":[{\"mesh\":0}]", """
+                "extensionsUsed":["EXT_mesh_gpu_instancing"],"extensionsRequired":["EXT_mesh_gpu_instancing"],
+                "nodes":[{"mesh":0,"translation":[2,0,0],"extensions":{
+                  "EXT_mesh_gpu_instancing":{"attributes":{"TRANSLATION":2}}
+                }}]""")
+            .replace("\"target\":34963}]", "\"target\":34963},{\"buffer\":0,\"byteOffset\":44,\"byteLength\":24}]")
+            .replace("\"type\":\"SCALAR\"}]", "\"type\":\"SCALAR\"},{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}]");
+        byte[] document = source.getBytes(StandardCharsets.UTF_8);
+        GltfResourceResolver resolver = path -> new ByteArrayInputStream(path.equals(GLTF) ? document : binary);
+        GltfAsset asset = new JgltfAssetLoader().load(GLTF, resolver);
+        assertEquals(3, asset.nodes().size());
+        assertArrayEquals(new int[]{1, 2}, asset.nodes().get(0).children());
+        assertEquals(0, asset.nodes().get(0).meshCount());
+        assertEquals(0, asset.nodes().get(1).mesh(0));
+        assertEquals(0, asset.nodes().get(2).mesh(0));
+        float[] world = PoseTransforms.computeBindMatrices(asset);
+        assertEquals(6.0f, world[16 + 12]);
+        assertEquals(9.0f, world[32 + 12]);
+        assertThrows(GltfLoadException.class,
+            () -> new JgltfAssetLoader(new GltfLoadLimits(4096, 4096, 2)).load(GLTF, resolver));
+    }
+
+    @Test
+    void importsExactNumericLabPbrChannelsFromMaterialExtras() throws Exception {
+        byte[] binary = triangleBinary();
+        String source = json("mesh.bin", binary.length).replace("\"meshes\":[", """
+            "materials":[{"extras":{"gfbsLabPbr":{
+              "reflectance":231,"porosityOrSubsurface":112,"height":190,"emission":172,
+              "smoothness":182,"normalX":144,"normalY":101,"ambientOcclusion":210
+            }}}],"meshes":[""");
+        GltfAsset asset = new JgltfAssetLoader().load(GLTF, path -> new ByteArrayInputStream(
+            path.equals(GLTF) ? source.getBytes(StandardCharsets.UTF_8) : binary));
+        assertEquals(new GltfLabPbr(-1, -1, 231, 112, 190, 172, 182, 144, 101, 210), asset.materials().get(0).labPbr());
     }
 
 

@@ -13,6 +13,7 @@ import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 /** Allocation-conscious vertex emission shared by the legacy and GPU-compile paths. */
 final class GltfGeometryPipeline {
     private static final float[] LINE_NORMAL = {0.0f, 1.0f, 0.0f};
+    private static final float POINT_RADIUS = 1.0f / 128.0f;
     private static final ThreadLocal<EmitContext> CONTEXT =
         ThreadLocal.withInitial(EmitContext::new);
 
@@ -22,6 +23,14 @@ final class GltfGeometryPipeline {
                      MaterialPass pass, Matrix4f model, Matrix3f normalMatrix,
                      float[] skin, int jointCount, float[] morphWeights,
                      int packedLight, int packedOverlay, float alpha) {
+        emit(consumer, primitive, material, pass, model, normalMatrix, skin, jointCount,
+            morphWeights, packedLight, packedOverlay, alpha, null);
+    }
+
+    static void emit(VertexConsumer consumer, GltfPrimitive primitive, GltfMaterial material,
+                     MaterialPass pass, Matrix4f model, Matrix3f normalMatrix,
+                     float[] skin, int jointCount, float[] morphWeights,
+                     int packedLight, int packedOverlay, float alpha, GltfPrimitiveClusters.Section section) {
         float[] positions = GltfPrimitiveAccess.positions(primitive);
         float[] normals = GltfPrimitiveAccess.normals(primitive);
         if (GltfVertexTransforms.hasActiveMorph(primitive, morphWeights)) {
@@ -41,13 +50,27 @@ final class GltfGeometryPipeline {
         float cosine = textureInfo.rotation() == 0.0f ? 1.0f : (float) Math.cos(textureInfo.rotation());
         float sine = textureInfo.rotation() == 0.0f ? 0.0f : (float) Math.sin(textureInfo.rotation());
         EmitContext ctx = CONTEXT.get();
+        if (ctx.consumer != null) ctx = new EmitContext();
         ctx.set(
             consumer, primitive, material, pass, model, normalMatrix, positions, normals,
             uv0, uv1, colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
             alpha, cosine, sine
         );
         try {
-            if (!isTriangleMode(primitive.mode())) {
+            if (section != null) {
+                for (int i = section.start(); i < section.end(); i++) {
+                    int start = section.triangles()[i];
+                    if (pass.page() != null && !pass.page().contains(start / 3)) continue;
+                    emitTriangle(ctx, index(indices, start), index(indices, start + 1), index(indices, start + 2), start / 3);
+                }
+            } else if (pass.page() != null && pass.page().remapped()) {
+                GltfMaterialBaker.Page page = pass.page();
+                for (int triangle = page.firstTriangle; triangle < page.firstTriangle + page.triangleCount; triangle++) {
+                    emitTriangle(ctx, GltfMaterialBaker.vertex(primitive, triangle, 0),
+                        GltfMaterialBaker.vertex(primitive, triangle, 1), GltfMaterialBaker.vertex(primitive, triangle, 2),
+                        triangle);
+                }
+            } else if (!isTriangleMode(primitive.mode())) {
                 emitLines(ctx, primitive.mode(), indices);
             } else {
                 emitTriangles(ctx, primitive.mode(), indices);
@@ -64,7 +87,7 @@ final class GltfGeometryPipeline {
         switch (mode) {
             case TRIANGLES -> {
                 for (int i = 0; i + 2 < count; i += 3) {
-                    emitTriangle(ctx, index(indices, i), index(indices, i + 1), index(indices, i + 2));
+                    emitTriangle(ctx, index(indices, i), index(indices, i + 1), index(indices, i + 2), i / 3);
                 }
             }
             case TRIANGLE_STRIP -> {
@@ -75,13 +98,13 @@ final class GltfGeometryPipeline {
                     if ((i & 1) != 0) {
                         int swap = a; a = b; b = swap;
                     }
-                    emitTriangle(ctx, a, b, c);
+                    emitTriangle(ctx, a, b, c, i - 2);
                 }
             }
             case TRIANGLE_FAN -> {
                 int first = index(indices, 0);
                 for (int i = 2; i < count; i++) {
-                    emitTriangle(ctx, first, index(indices, i - 1), index(indices, i));
+                    emitTriangle(ctx, first, index(indices, i - 1), index(indices, i), i - 2);
                 }
             }
             default -> throw new IllegalStateException("Unexpected triangle mode " + mode);
@@ -94,7 +117,11 @@ final class GltfGeometryPipeline {
             case POINTS -> {
                 for (int i = 0; i < count; i++) {
                     int vertex = index(indices, i);
-                    emitLine(ctx, vertex, vertex);
+                    // Minecraft 1.20.1 has no POINTS vertex mode. Emit a small visible marker.
+                    emitVertex(ctx, vertex, LINE_NORMAL, -POINT_RADIUS, 0);
+                    emitVertex(ctx, vertex, LINE_NORMAL, POINT_RADIUS, 0);
+                    emitVertex(ctx, vertex, LINE_NORMAL, 0, -POINT_RADIUS);
+                    emitVertex(ctx, vertex, LINE_NORMAL, 0, POINT_RADIUS);
                 }
             }
             case LINES -> {
@@ -123,18 +150,28 @@ final class GltfGeometryPipeline {
         emitVertex(ctx, second, LINE_NORMAL);
     }
 
-    private static void emitTriangle(EmitContext ctx, int a, int b, int c) {
+    private static void emitTriangle(EmitContext ctx, int a, int b, int c, int triangle) {
+        ctx.triangle = triangle;
         float[] generated = null;
         if (ctx.normals == null) {
             GltfVertexTransforms.faceNormal(ctx.positions, a, b, c, ctx.faceNormal);
             generated = ctx.faceNormal;
         }
-        emitVertex(ctx, a, generated);
-        emitVertex(ctx, b, generated);
-        emitVertex(ctx, c, generated);
+        emitVertex(ctx, a, generated, 0, 0, 0);
+        emitVertex(ctx, ctx.mirrored ? c : b, generated, 0, 0, ctx.mirrored ? 2 : 1);
+        emitVertex(ctx, ctx.mirrored ? b : c, generated, 0, 0, ctx.mirrored ? 1 : 2);
     }
 
     private static void emitVertex(EmitContext ctx, int vertex, float[] generatedNormal) {
+        emitVertex(ctx, vertex, generatedNormal, 0, 0);
+    }
+
+    private static void emitVertex(EmitContext ctx, int vertex, float[] generatedNormal, float dx, float dy) {
+        emitVertex(ctx, vertex, generatedNormal, dx, dy, -1);
+    }
+
+    private static void emitVertex(EmitContext ctx, int vertex, float[] generatedNormal, float dx, float dy,
+                                   int corner) {
         int position = vertex * 3;
         float x = ctx.positions[position];
         float y = ctx.positions[position + 1];
@@ -151,8 +188,7 @@ final class GltfGeometryPipeline {
             nx = ctx.scratch[3]; ny = ctx.scratch[4]; nz = ctx.scratch[5];
         }
 
-        int colorComponents = ctx.colors == null ? 0
-            : ctx.colors.length / Math.max(1, ctx.positions.length / 3);
+        int colorComponents = ctx.colorComponents;
         float red;
         float green;
         float blue;
@@ -164,10 +200,11 @@ final class GltfGeometryPipeline {
                 * ctx.material.baseColorGreen() * ctx.pass.greenMultiplier();
             blue = (ctx.colors == null ? 1.0f : ctx.colors[vertex * colorComponents + 2])
                 * ctx.material.baseColorBlue() * ctx.pass.blueMultiplier();
-            float vertexAlpha = ctx.colors == null || colorComponents < 4
+            float vertexAlpha = ctx.material.alphaMode() == AlphaMode.OPAQUE
+                || ctx.colors == null || colorComponents < 4
                 ? 1.0f : ctx.colors[vertex * colorComponents + 3];
-            float factorAlpha = ctx.material.alphaMode() == AlphaMode.MASK
-                ? 1.0f : ctx.material.baseColorAlpha();
+            float factorAlpha = ctx.material.alphaMode() == AlphaMode.BLEND
+                ? ctx.material.baseColorAlpha() : 1.0f;
             outputAlpha = vertexAlpha * factorAlpha * ctx.alpha;
         } else {
             float strength = ctx.pass.colorScale() * ctx.alpha;
@@ -185,6 +222,11 @@ final class GltfGeometryPipeline {
         float scaledV = v * textureInfo.scaleV();
         u = textureInfo.offsetU() + ctx.cosine * scaledU - ctx.sine * scaledV;
         v = textureInfo.offsetV() + ctx.sine * scaledU + ctx.cosine * scaledV;
+        GltfMaterialBaker.Page page = ctx.pass.page();
+        if (page != null && page.remapped() && corner >= 0) {
+            u = page.u(ctx.triangle, corner);
+            v = page.v(ctx.triangle, corner);
+        }
 
         // Avoid VertexConsumer's Matrix overloads here: vanilla's convenience implementations
         // materialize temporary JOML vectors. This path can still handle deformed geometry, so
@@ -201,8 +243,15 @@ final class GltfGeometryPipeline {
             + ctx.normalMatrix.m21() * nz;
         float tnz = ctx.normalMatrix.m02() * nx + ctx.normalMatrix.m12() * ny
             + ctx.normalMatrix.m22() * nz;
+        float normalLength = tnx * tnx + tny * tny + tnz * tnz;
+        if (normalLength > 1.0e-12f && Math.abs(normalLength - 1.0f) > 0.0001f) {
+            float inverse = (float) (1.0 / Math.sqrt(normalLength));
+            tnx *= inverse;
+            tny *= inverse;
+            tnz *= inverse;
+        }
 
-        ctx.consumer.vertex(tx, ty, tz)
+        ctx.consumer.vertex(tx + dx, ty + dy, tz)
             .color(channel(red), channel(green), channel(blue), channel(outputAlpha))
             .uv(u, v)
             .overlayCoords(ctx.packedOverlay)
@@ -231,10 +280,23 @@ final class GltfGeometryPipeline {
     enum PassKind { BASE, EMISSIVE }
 
     record MaterialPass(PassKind kind, GltfTextureInfo textureInfo, float colorScale,
-                        float redMultiplier, float greenMultiplier, float blueMultiplier) {
+                        float redMultiplier, float greenMultiplier, float blueMultiplier,
+                        GltfMaterialBaker.Page page) {
+        MaterialPass(PassKind kind, GltfTextureInfo textureInfo, float colorScale,
+                     float redMultiplier, float greenMultiplier, float blueMultiplier) {
+            this(kind, textureInfo, colorScale, redMultiplier, greenMultiplier, blueMultiplier, null);
+        }
+
+        MaterialPass withPage(GltfMaterialBaker.Page page) {
+            return page == null ? this : new MaterialPass(kind, page.textureInfo, colorScale,
+                redMultiplier, greenMultiplier, blueMultiplier, page);
+        }
         static MaterialPass base(GltfMaterial material, float red, float green, float blue) {
-            return new MaterialPass(PassKind.BASE, material.baseColorTextureInfo(), 1.0f,
-                red, green, blue);
+            return base(material.baseColorTextureInfo(), red, green, blue);
+        }
+
+        static MaterialPass base(GltfTextureInfo texture, float red, float green, float blue) {
+            return new MaterialPass(PassKind.BASE, texture, 1.0f, red, green, blue);
         }
 
         static MaterialPass emissive(GltfMaterial material, float red, float green, float blue) {
@@ -275,6 +337,9 @@ final class GltfGeometryPipeline {
         final float[] faceNormal = new float[3];
         float cosine;
         float sine;
+        boolean mirrored;
+        int colorComponents;
+        int triangle;
 
         void set(
             VertexConsumer consumer, GltfPrimitive primitive, GltfMaterial material,
@@ -303,6 +368,8 @@ final class GltfGeometryPipeline {
             this.alpha = alpha;
             this.cosine = cosine;
             this.sine = sine;
+            this.mirrored = model.determinant3x3() < 0.0f;
+            this.colorComponents = colors == null ? 0 : colors.length / Math.max(1, positions.length / 3);
         }
 
         void clear() {

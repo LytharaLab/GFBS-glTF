@@ -2,6 +2,7 @@ package org.lytharalab.gfbs.gltf.api.client;
 
 import net.minecraft.client.renderer.RenderType;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
+import org.lytharalab.gfbs.gltf.api.client.material.GltfPbrBakeOptions;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -18,6 +19,9 @@ public final class GltfRenderOptions {
     private boolean frustumCulling = true;
     private boolean occlusionCulling;
     private boolean castShadows = true;
+    private boolean shadowFrustumCulling;
+    private boolean labPbrEmission;
+    private GltfPbrBakeOptions pbrBakeOptions = GltfPbrBakeOptions.DEFAULT;
     private double maxRenderDistance;
     private float alpha = 1.0f;
     private RenderType overrideRenderType;
@@ -33,6 +37,20 @@ public final class GltfRenderOptions {
     public boolean frustumCulling() { return frustumCulling; }
     public boolean occlusionCulling() { return occlusionCulling; }
     public boolean castShadows() { return castShadows; }
+    public boolean shadowFrustumCulling() { return shadowFrustumCulling; }
+    public boolean labPbrEmission() { return labPbrEmission; }
+    public GltfPbrBakeOptions pbrBakeOptions() { return pbrBakeOptions; }
+
+    /** Uses LabPBR emission for representable glTF emission and explicitly authored packed maps. */
+    public GltfRenderOptions labPbrEmission(boolean enabled) {
+        labPbrEmission = enabled;
+        return this;
+    }
+
+    public GltfRenderOptions pbrBakeOptions(GltfPbrBakeOptions options) {
+        pbrBakeOptions = Objects.requireNonNull(options, "options");
+        return this;
+    }
     public double maxRenderDistance() { return maxRenderDistance; }
     public float alpha() { return alpha; }
     public RenderType overrideRenderType() { return overrideRenderType; }
@@ -75,6 +93,15 @@ public final class GltfRenderOptions {
      */
     public GltfRenderOptions castShadows(boolean enabled) {
         castShadows = enabled;
+        return this;
+    }
+
+    /**
+     * Uses Iris/Oculus's entity-shadow culling volume when available. Enable this for placements
+     * supplied by the entity or block-entity shadow dispatcher.
+     */
+    public GltfRenderOptions shadowFrustumCulling(boolean enabled) {
+        shadowFrustumCulling = enabled;
         return this;
     }
 
@@ -138,6 +165,9 @@ public final class GltfRenderOptions {
         copy.frustumCulling = frustumCulling;
         copy.occlusionCulling = occlusionCulling;
         copy.castShadows = castShadows;
+        copy.shadowFrustumCulling = shadowFrustumCulling;
+        copy.labPbrEmission = labPbrEmission;
+        copy.pbrBakeOptions = pbrBakeOptions;
         copy.maxRenderDistance = maxRenderDistance;
         copy.alpha = alpha;
         copy.overrideRenderType = overrideRenderType;

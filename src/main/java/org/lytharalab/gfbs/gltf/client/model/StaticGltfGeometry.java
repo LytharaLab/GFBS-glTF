@@ -4,6 +4,7 @@ import com.mojang.math.Transformation;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.resources.model.Material;
 import net.minecraft.client.resources.model.ModelBaker;
 import net.minecraft.client.resources.model.ModelState;
@@ -18,6 +19,8 @@ import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.joml.Vector4f;
 import org.lytharalab.gfbs.gltf.api.animation.ModelPose;
+import org.lytharalab.gfbs.gltf.api.client.material.GltfPbrBakeOptions;
+import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
@@ -28,6 +31,7 @@ import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
 import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 import org.lytharalab.gfbs.gltf.client.render.GltfVertexTransforms;
+import org.lytharalab.gfbs.gltf.client.render.GltfMaterialBaker;
 import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
 import java.util.ArrayDeque;
@@ -120,13 +124,26 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             GltfMesh mesh = asset.meshes().get(meshIndex);
             float[] morphWeights = pose.node(nodeIndex).weights();
             if (morphWeights == null) morphWeights = mesh.defaultMorphWeights();
-            for (GltfPrimitive primitive : mesh.primitives()) {
+            for (int primitiveIndex = 0; primitiveIndex < mesh.primitives().size(); primitiveIndex++) {
+                GltfPrimitive primitive = mesh.primitives().get(primitiveIndex);
                 GltfMaterial material = asset.materials().get(primitive.material());
-                TextureAtlasSprite sprite = spriteGetter.apply(resolveMaterial(
-                    context, primitive.material(), material
-                ));
-                bakePrimitive(context, modelBuilder, primitive, material, sprite, transform,
-                    normalTransform, skin, jointCount, morphWeights);
+                Material external = resolveMaterial(context, primitive.material(), material);
+                GltfGeneratedMaterialPack pack = external == null ? GltfGeneratedMaterialPack.current() : null;
+                if (pack == null) {
+                    TextureAtlasSprite sprite = spriteGetter.apply(external == null
+                        ? context.getMaterial("particle") : external);
+                    bakePrimitive(context, modelBuilder, primitive, material, sprite, transform,
+                        normalTransform, skin, jointCount, morphWeights, null);
+                } else {
+                    for (GltfMaterialBaker.Page page : pack.materialPages(asset, meshIndex,
+                        primitiveIndex, settings.pbrBakeOptions(), settings.flipV()).pages()) {
+                        TextureAtlasSprite sprite = spriteGetter.apply(new Material(TextureAtlas.LOCATION_BLOCKS,
+                            pack.sprite(asset, meshIndex, primitiveIndex, settings.pbrBakeOptions(),
+                                settings.flipV(), page.index)));
+                        bakePrimitive(context, modelBuilder, primitive, material, sprite, transform,
+                            normalTransform, skin, jointCount, morphWeights, page);
+                    }
+                }
             }
         }
     }
@@ -135,7 +152,7 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
                                GltfPrimitive primitive, GltfMaterial material,
                                TextureAtlasSprite sprite, Matrix4f transform,
                                Matrix3f normalTransform, float[] skin, int jointCount,
-                               float[] morphWeights) {
+                               float[] morphWeights, GltfMaterialBaker.Page page) {
         GltfVertexTransforms.PreparedGeometry geometry =
             GltfVertexTransforms.prepare(primitive, morphWeights);
         float[] positions = geometry.positions();
@@ -148,12 +165,14 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
         int[] indices = indices(primitive);
         float[] skinScratch = new float[6];
         boolean mirrored = transform.determinant() < 0.0f;
+        int[] triangleOrdinal = {page == null ? 0 : page.firstTriangle};
 
         TriangleConsumer consumer = (a, b, c) -> {
             BakedVertex[] vertices = transformTriangle(
                 a, mirrored ? c : b, mirrored ? b : c,
                 material, positions, normals, uv0, uv1, colors, joints, weights,
-                skin, jointCount, skinScratch, transform, normalTransform
+                skin, jointCount, skinScratch, transform, normalTransform, page,
+                triangleOrdinal[0]++, mirrored
             );
             if (isDegenerate(vertices)) return;
             for (BakedVertex[] quadVertices : quadrangulate(vertices)) {
@@ -169,14 +188,20 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
                 }
             }
         };
-        emitTriangles(primitive.mode(), indices, consumer);
+        if (page != null && page.remapped()) {
+            for (int triangle = page.firstTriangle; triangle < page.firstTriangle + page.triangleCount; triangle++) {
+                consumer.accept(GltfMaterialBaker.vertex(primitive, triangle, 0),
+                    GltfMaterialBaker.vertex(primitive, triangle, 1),
+                    GltfMaterialBaker.vertex(primitive, triangle, 2));
+            }
+        } else emitTriangles(primitive.mode(), indices, consumer);
     }
 
     private BakedVertex[] transformTriangle(
         int a, int b, int c, GltfMaterial material, float[] positions, float[] normals,
         float[] uv0, float[] uv1, float[] colors, int[] joints, float[] weights,
         float[] skin, int jointCount, float[] skinScratch, Matrix4f transform,
-        Matrix3f normalTransform
+        Matrix3f normalTransform, GltfMaterialBaker.Page page, int triangleOrdinal, boolean mirrored
     ) {
         int[] triangle = {a, b, c};
         float[] localFaceNormal = normals == null
@@ -215,7 +240,7 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             float blue = colors == null ? 1.0f : colors[vertex * colorComponents + 2];
             float alpha = colors == null || colorComponents < 4
                 ? 1.0f : colors[vertex * colorComponents + 3];
-            GltfTextureInfo textureInfo = material.baseColorTextureInfo();
+            GltfTextureInfo textureInfo = page == null ? material.baseColorTextureInfo() : page.textureInfo;
             float[] uv = textureInfo.texCoord() == 1 ? uv1 : uv0;
             float u = uv == null ? 0.0f : uv[vertex * 2];
             float v = uv == null ? 0.0f : uv[vertex * 2 + 1];
@@ -223,13 +248,18 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             textureInfo.transform(u, v, transformedUv);
             u = transformedUv[0];
             v = transformedUv[1];
-            if (settings.flipV()) v = 1.0f - v;
+            if (page != null && page.remapped()) {
+                int corner = mirrored && i > 0 ? 3 - i : i;
+                u = page.u(triangleOrdinal, corner);
+                v = page.v(triangleOrdinal, corner);
+            } else if (page == null && settings.flipV()) v = 1.0f - v;
+            float baseAlpha = page != null && material.alphaMode() != AlphaMode.BLEND ? 1.0f : base[3];
             result[i] = new BakedVertex(
                 transformedPosition.x, transformedPosition.y, transformedPosition.z,
                 transformedNormal.x, transformedNormal.y, transformedNormal.z,
                 u, v,
                 channel(red * base[0]), channel(green * base[1]),
-                channel(blue * base[2]), channel(alpha * base[3])
+                channel(blue * base[2]), channel(alpha * baseAlpha)
             );
         }
         if (normals == null) {
@@ -251,7 +281,7 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
         QuadBakingVertexConsumer.Buffered baker = new QuadBakingVertexConsumer.Buffered();
         baker.setSprite(sprite);
         baker.setTintIndex(-1);
-        baker.setShade(settings.shade());
+        baker.setShade(settings.shade() && !unlit);
         baker.setHasAmbientOcclusion(ambientOcclusion);
         baker.setDirection(Direction.getNearest(faceNormal.x, faceNormal.y, faceNormal.z));
         for (int index : order) {
@@ -320,7 +350,7 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
             return context.getMaterial(material.name());
         }
         if (context.hasMaterial("texture")) return context.getMaterial("texture");
-        return context.getMaterial("particle");
+        return null;
     }
 
     private void validateStaticScene() {
@@ -525,12 +555,20 @@ public final class StaticGltfGeometry extends SimpleUnbakedGeometry<StaticGltfGe
         boolean flipV,
         boolean shade,
         boolean automaticCulling,
-        Map<String, String> materialTextures
+        Map<String, String> materialTextures,
+        GltfPbrBakeOptions pbrBakeOptions
     ) {
+        public Settings(int scene, Vector3f scale, Vector3f translation, boolean flipV,
+                        boolean shade, boolean automaticCulling, Map<String, String> materialTextures) {
+            this(scene, scale, translation, flipV, shade, automaticCulling, materialTextures,
+                GltfPbrBakeOptions.DEFAULT);
+        }
+
         public Settings {
             scale = new Vector3f(scale);
             translation = new Vector3f(translation);
             materialTextures = Map.copyOf(materialTextures);
+            java.util.Objects.requireNonNull(pbrBakeOptions, "pbrBakeOptions");
         }
 
         @Override

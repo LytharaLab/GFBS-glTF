@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.ShaderInstance;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15;
@@ -22,51 +23,86 @@ import java.util.UUID;
 final class GltfOcclusionCuller {
     static final GltfOcclusionCuller INSTANCE = new GltfOcclusionCuller();
     private static final int NONE = 0;
+    private static final int QUERIES_PER_FRAME = 64;
     private final Map<QueryKey, Query> queries = new HashMap<>();
     private boolean supported = true;
-    private int frame;
+    private long frame = Long.MIN_VALUE;
+    private int issued;
 
     private GltfOcclusionCuller() {
     }
 
     void beginFrame() {
-        frame++;
+        long now = GltfGpuCache.frame();
+        if (now == frame) return;
+        frame = now;
+        issued = 0;
+        if (frame % 60 == 0) evictStale();
     }
 
-    boolean wasVisible(QueryKey key) {
+    boolean wasVisible(QueryKey key, Matrix4f projection, Matrix4f modelView) {
         if (!supported) return true;
         Query query = queries.get(key);
-        if (query == null) return true;
-        poll(query);
-        return query.lastVisible;
+        if (query == null || frame - query.lastFrame > 2
+            || !query.projection.equals(projection) || !query.modelView.equals(modelView)) return true;
+        try {
+            poll(query);
+            return query.lastVisible;
+        } catch (RuntimeException | LinkageError failure) {
+            supported = false;
+            dispose();
+            return true;
+        }
     }
 
+    boolean canIssue() { return supported && issued < QUERIES_PER_FRAME; }
+
     void issue(QueryKey key, Matrix4f projection, Matrix4f modelView, GltfBounds bounds) {
-        if (!supported || projection == null || !bounds.valid()) return;
+        if (!canIssue() || projection == null || !bounds.valid() || containsCamera(modelView, bounds)) return;
         try {
             Query query = queries.computeIfAbsent(key, ignored -> new Query());
             poll(query);
-            if (!query.pending) {
+            if (!query.pending && query.lastFrame != frame) {
+                if (!query.projection.equals(projection) || !query.modelView.equals(modelView)) {
+                    query.lastVisible = true;
+                }
                 if (query.id == NONE) query.id = GL33.glGenQueries();
                 GL33.glBeginQuery(GL33.GL_ANY_SAMPLES_PASSED, query.id);
-                drawBox(new Matrix4f(projection).mul(modelView), bounds);
-                GL33.glEndQuery(GL33.GL_ANY_SAMPLES_PASSED);
+                try {
+                    // BufferUploader applies the active projection and model-view matrices.
+                    drawBox(modelView, bounds);
+                } finally {
+                    GL33.glEndQuery(GL33.GL_ANY_SAMPLES_PASSED);
+                }
+                query.projection.set(projection);
+                query.modelView.set(modelView);
                 query.pending = true;
+                query.lastFrame = frame;
+                issued++;
             }
-            query.lastFrame = frame;
-        } catch (Throwable failure) {
+        } catch (RuntimeException | LinkageError failure) {
             supported = false;
             dispose();
         }
     }
 
-    void evictStale() {
+    private void evictStale() {
         queries.entrySet().removeIf(entry -> {
             Query query = entry.getValue();
             if (frame - query.lastFrame <= 120) return false;
             delete(query);
             return true;
         });
+    }
+
+    private final Matrix4f inverse = new Matrix4f();
+
+    private boolean containsCamera(Matrix4f model, GltfBounds bounds) {
+        inverse.set(RenderSystem.getModelViewMatrix()).mul(model).invertAffine();
+        float x = inverse.m30(), y = inverse.m31(), z = inverse.m32();
+        return !Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)
+            || x >= bounds.minX() && x <= bounds.maxX() && y >= bounds.minY() && y <= bounds.maxY()
+                && z >= bounds.minZ() && z <= bounds.maxZ();
     }
 
     void dispose() {
@@ -95,6 +131,7 @@ final class GltfOcclusionCuller {
         RenderSystem.colorMask(false, false, false, false);
         RenderSystem.depthMask(false);
         RenderSystem.enableDepthTest();
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
         RenderSystem.disableCull();
         return state;
     }
@@ -135,11 +172,14 @@ final class GltfOcclusionCuller {
         int id;
         boolean lastVisible = true;
         boolean pending;
-        int lastFrame;
+        long lastFrame = Long.MIN_VALUE;
+        final Matrix4f projection = new Matrix4f();
+        final Matrix4f modelView = new Matrix4f();
     }
 
     record State(boolean depthTest, boolean depthMask, boolean cull,
-                 boolean red, boolean green, boolean blue, boolean alpha) {
+                 boolean red, boolean green, boolean blue, boolean alpha, int depthFunction,
+                 ShaderInstance shader) {
         static State capture() {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 ByteBuffer mask = stack.malloc(4);
@@ -151,7 +191,9 @@ final class GltfOcclusionCuller {
                     mask.get(0) != 0,
                     mask.get(1) != 0,
                     mask.get(2) != 0,
-                    mask.get(3) != 0
+                    mask.get(3) != 0,
+                    GL11.glGetInteger(GL11.GL_DEPTH_FUNC),
+                    RenderSystem.getShader()
                 );
             }
         }
@@ -159,6 +201,8 @@ final class GltfOcclusionCuller {
         void restore() {
             RenderSystem.colorMask(red, green, blue, alpha);
             RenderSystem.depthMask(depthMask);
+            RenderSystem.depthFunc(depthFunction);
+            RenderSystem.setShader(() -> shader);
             if (depthTest) RenderSystem.enableDepthTest(); else RenderSystem.disableDepthTest();
             if (cull) RenderSystem.enableCull(); else RenderSystem.disableCull();
         }

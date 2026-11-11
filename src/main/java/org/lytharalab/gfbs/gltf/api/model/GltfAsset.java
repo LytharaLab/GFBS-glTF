@@ -3,8 +3,11 @@ package org.lytharalab.gfbs.gltf.api.model;
 import net.minecraft.resources.ResourceLocation;
 import org.lytharalab.gfbs.gltf.api.animation.AnimationChannel;
 import org.lytharalab.gfbs.gltf.api.animation.AnimationClip;
+import org.lytharalab.gfbs.gltf.api.animation.AnimationPath;
+import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
 import java.util.LinkedHashMap;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -24,6 +27,46 @@ public final class GltfAsset {
     private final List<String> animationNames;
     private final List<String> extensionsUsed;
     private final List<String> extensionsRequired;
+    private volatile float[] bindWorldMatrices;
+    private volatile BitSet animatedTransforms;
+    private volatile BitSet animatedSubtrees;
+
+    float[] bindWorldMatrices() {
+        float[] result = bindWorldMatrices;
+        if (result != null) return result;
+        synchronized (this) {
+            if (bindWorldMatrices == null) bindWorldMatrices = PoseTransforms.computeBindMatrices(this);
+            return bindWorldMatrices;
+        }
+    }
+
+    BitSet animatedTransforms() {
+        BitSet result = animatedTransforms;
+        if (result != null) return result;
+        synchronized (this) {
+            if (animatedTransforms == null) {
+                BitSet targets = new BitSet();
+                for (AnimationClip clip : animations) {
+                    for (AnimationChannel channel : clip.channels()) {
+                        if (channel.path() != AnimationPath.WEIGHTS) targets.set(channel.node());
+                    }
+                }
+                animatedTransforms = targets;
+            }
+            return animatedTransforms;
+        }
+    }
+
+    BitSet animatedSubtrees() {
+        BitSet result = animatedSubtrees;
+        if (result != null) return result;
+        synchronized (this) {
+            if (animatedSubtrees == null) {
+                animatedSubtrees = GltfAssetAccess.subtrees(this, animatedTransforms());
+            }
+            return animatedSubtrees;
+        }
+    }
 
     public GltfAsset(ResourceLocation id, List<GltfScene> scenes, List<GltfNode> nodes,
                      List<GltfMesh> meshes, List<GltfMaterial> materials,
@@ -81,16 +124,20 @@ public final class GltfAsset {
                 }
             }
         }
+        boolean[] listedChildren = new boolean[nodes.size()];
         for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
             GltfNode node = nodes.get(nodeIndex);
             if (node.parent() >= 0) requireIndex(node.parent(), nodes.size(), "parent node", nodeIndex);
-            java.util.HashSet<Integer> children = new java.util.HashSet<>();
-            for (int child : node.children()) {
+            for (int i = 0; i < node.childCount(); i++) {
+                int child = node.child(i);
                 requireIndex(child, nodes.size(), "child node", nodeIndex);
-                if (!children.add(child)) throw new IllegalArgumentException("Node " + nodeIndex + " contains duplicate child " + child);
                 if (nodes.get(child).parent() != nodeIndex) {
                     throw new IllegalArgumentException("Node " + nodeIndex + " lists child " + child + " but the child's parent differs");
                 }
+                if (listedChildren[child]) {
+                    throw new IllegalArgumentException("Node " + nodeIndex + " contains duplicate child " + child);
+                }
+                listedChildren[child] = true;
             }
             for (int mesh : node.meshes()) requireIndex(mesh, meshes.size(), "mesh", nodeIndex);
             if (node.skin() >= 0) requireIndex(node.skin(), skins.size(), "skin", nodeIndex);
@@ -109,7 +156,7 @@ public final class GltfAsset {
         }
         for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
             int parent = nodes.get(nodeIndex).parent();
-            if (parent >= 0 && !contains(nodes.get(parent).children(), nodeIndex)) {
+            if (parent >= 0 && !listedChildren[nodeIndex]) {
                 throw new IllegalArgumentException("Node " + nodeIndex + " names parent " + parent + " but the parent does not list it as a child");
             }
         }
@@ -146,6 +193,8 @@ public final class GltfAsset {
             requireOptionalIndex(material.normalTexture(), textures.size(), "normal texture", materialIndex);
             requireOptionalIndex(material.occlusionTexture(), textures.size(), "occlusion texture", materialIndex);
             requireOptionalIndex(material.emissiveTexture(), textures.size(), "emissive texture", materialIndex);
+            requireOptionalIndex(material.labPbr().normalTexture(), textures.size(), "LabPBR normal texture", materialIndex);
+            requireOptionalIndex(material.labPbr().specularTexture(), textures.size(), "LabPBR specular texture", materialIndex);
         }
         for (int skinIndex = 0; skinIndex < skins.size(); skinIndex++) {
             GltfSkin skin = skins.get(skinIndex);
@@ -226,11 +275,6 @@ public final class GltfAsset {
         }
     }
 
-    private static boolean contains(int[] values, int expected) {
-        for (int value : values) if (value == expected) return true;
-        return false;
-    }
-
     private static void requireIndex(int index, int size, String label, int owner) {
         if (index < 0 || index >= size) throw new IllegalArgumentException(label + " index " + index + " is invalid for item " + owner);
     }
@@ -279,6 +323,10 @@ public final class GltfAsset {
             "emissive",
             meshIndex
         );
+        requireCoordinates(primitive, material.labPbr().normalTexture(), material.baseColorTexCoord(),
+            "LabPBR normal", meshIndex);
+        requireCoordinates(primitive, material.labPbr().specularTexture(), material.baseColorTexCoord(),
+            "LabPBR specular", meshIndex);
     }
 
     private static void requireCoordinates(
@@ -290,8 +338,8 @@ public final class GltfAsset {
     ) {
         if (texture < 0) return;
         boolean missing = texCoord == 0
-            ? primitive.texCoords0() == null
-            : primitive.texCoords1() == null;
+            ? GltfPrimitiveAccess.texCoords0(primitive) == null
+            : GltfPrimitiveAccess.texCoords1(primitive) == null;
         if (missing) {
             throw new IllegalArgumentException(
                 "Mesh " + meshIndex + " material " + label

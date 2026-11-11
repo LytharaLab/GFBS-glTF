@@ -8,7 +8,6 @@ import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 
 import java.util.LinkedHashMap;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -28,14 +27,15 @@ public final class GltfPrimitiveState {
     private GltfMaterialVariant materialVariant = GltfMaterialVariant.source();
     private GltfMaterial material;
     private int materialIndex;
-    private final Map<GltfMaterialVariant, ResolvedMaterial> materialCache = new HashMap<>();
-    private final Map<String, Object> parameters = new LinkedHashMap<>();
+    private Map<GltfMaterialVariant, ResolvedMaterial> materialCache;
+    private Map<String, Object> parameters;
 
     GltfPrimitiveState(GltfNodeManager owner, GltfPrimitiveKey key, GltfPrimitive definition) {
         this.owner = owner;
         this.key = key;
         this.definition = definition;
-        owner.resolveMaterial(this, materialVariant);
+        this.materialIndex = definition.material();
+        this.material = owner.asset().materials().get(materialIndex);
     }
 
     public GltfPrimitiveKey key() { return key; }
@@ -65,9 +65,12 @@ public final class GltfPrimitiveState {
     public GltfRenderOptions.CullMode cullModeOrNull() { return cullMode; }
     public RenderType renderTypeOrNull() { return renderType; }
     public GltfPrimitiveState colorMultiplier(float red, float green, float blue) {
-        colorMultiplier[0] = nonNegative(red, "Red multiplier");
-        colorMultiplier[1] = nonNegative(green, "Green multiplier");
-        colorMultiplier[2] = nonNegative(blue, "Blue multiplier");
+        float nextRed = nonNegative(red, "Red multiplier");
+        float nextGreen = nonNegative(green, "Green multiplier");
+        float nextBlue = nonNegative(blue, "Blue multiplier");
+        colorMultiplier[0] = nextRed;
+        colorMultiplier[1] = nextGreen;
+        colorMultiplier[2] = nextBlue;
         changed(); return this;
     }
 
@@ -105,11 +108,18 @@ public final class GltfPrimitiveState {
 
     public GltfPrimitiveState parameter(String name, Object value) {
         if (name == null || name.isBlank()) throw new IllegalArgumentException("Parameter name is blank");
-        if (value == null) parameters.remove(name); else parameters.put(name, value);
+        if (value == null) {
+            if (parameters != null) parameters.remove(name);
+        } else {
+            if (parameters == null) parameters = new LinkedHashMap<>();
+            parameters.put(name, value);
+        }
         changed(); return this;
     }
-    public Optional<Object> parameter(String name) { return Optional.ofNullable(parameters.get(name)); }
-    public Map<String, Object> parameters() { return Map.copyOf(parameters); }
+    public Optional<Object> parameter(String name) {
+        return Optional.ofNullable(parameters == null ? null : parameters.get(name));
+    }
+    public Map<String, Object> parameters() { return parameters == null ? Map.of() : Map.copyOf(parameters); }
 
     public GltfPrimitiveState reset() {
         visible = collisionEnabled = castShadows = true;
@@ -118,7 +128,8 @@ public final class GltfPrimitiveState {
         lightMode = null;
         cullMode = null;
         renderType = null;
-        parameters.clear();
+        parameters = null;
+        materialCache = null;
         owner.resolveMaterial(this, GltfMaterialVariant.source());
         owner.touchCollision();
         return this;
@@ -128,14 +139,22 @@ public final class GltfPrimitiveState {
         materialVariant = variant;
         materialIndex = index;
         material = value;
-        materialCache.put(variant, new ResolvedMaterial(index, value));
+        if (!variant.override().isEmpty()) {
+            if (materialCache == null) materialCache = new LinkedHashMap<>(8, 0.75f, true);
+            if (materialCache.size() >= 16 && !materialCache.containsKey(variant)) {
+                materialCache.remove(materialCache.keySet().iterator().next());
+            }
+            materialCache.put(variant, new ResolvedMaterial(index, value));
+        }
     }
-    ResolvedMaterial cachedMaterial(GltfMaterialVariant variant) { return materialCache.get(variant); }
+    ResolvedMaterial cachedMaterial(GltfMaterialVariant variant) {
+        return materialCache == null ? null : materialCache.get(variant);
+    }
     float[] colorMultiplierInternal() { return colorMultiplier; }
     GltfNodeManager.PrimitiveSnapshot snapshot() {
         return new GltfNodeManager.PrimitiveSnapshot(
             visible, collisionEnabled, castShadows, alpha, colorMultiplier,
-            lightMode, cullMode, renderType, materialVariant, parameters
+            lightMode, cullMode, renderType, materialVariant, parameters == null ? Map.of() : parameters
         );
     }
     void restore(GltfNodeManager.PrimitiveSnapshot snapshot) {
@@ -147,8 +166,7 @@ public final class GltfPrimitiveState {
         lightMode = snapshot.lightMode();
         cullMode = snapshot.cullMode();
         renderType = snapshot.renderType();
-        parameters.clear();
-        parameters.putAll(snapshot.parameters());
+        parameters = snapshot.parameters().isEmpty() ? null : new LinkedHashMap<>(snapshot.parameters());
         owner.resolveMaterial(this, snapshot.materialVariant());
     }
     private void changed() { owner.touch(); }

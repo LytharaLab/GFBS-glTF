@@ -19,7 +19,7 @@ import java.util.Optional;
 public final class GltfNodeState {
     private final GltfNodeManager owner;
     private final int index;
-    private final List<GltfPrimitiveState> primitives;
+    private List<GltfPrimitiveState> primitives;
     private boolean subtreeVisible = true;
     private boolean selfVisible = true;
     private boolean collisionEnabled = true;
@@ -34,12 +34,11 @@ public final class GltfNodeState {
     private float[] rotation;
     private float[] scale;
     private float[] morphWeights;
-    private final Map<String, Object> parameters = new LinkedHashMap<>();
+    private Map<String, Object> parameters;
 
-    GltfNodeState(GltfNodeManager owner, int index, List<GltfPrimitiveState> primitives) {
+    GltfNodeState(GltfNodeManager owner, int index) {
         this.owner = owner;
         this.index = index;
-        this.primitives = primitives;
     }
 
     public int index() { return index; }
@@ -48,12 +47,19 @@ public final class GltfNodeState {
     public String path() { return owner.path(index); }
     public int parentIndex() { return definition().parent(); }
     public int[] childIndices() { return definition().children(); }
-    public List<GltfPrimitiveState> primitives() { return List.copyOf(primitives); }
+    public List<GltfPrimitiveState> primitives() {
+        if (primitives == null) primitives = owner.primitivesForNode(index);
+        return primitives;
+    }
 
     /** A false value suppresses this node and its complete child subtree. */
     public boolean subtreeVisible() { return subtreeVisible; }
     public GltfNodeState subtreeVisible(boolean visible) {
-        subtreeVisible = visible; changed(); return this;
+        if (subtreeVisible != visible) {
+            subtreeVisible = visible;
+            owner.subtreeVisibilityChanged(visible);
+        }
+        return this;
     }
 
     /** Controls only this node's meshes; children remain independently traversable. */
@@ -84,9 +90,12 @@ public final class GltfNodeState {
     public GltfRenderOptions.LightMode lightModeOrNull() { return lightMode; }
     public GltfRenderOptions.CullMode cullModeOrNull() { return cullMode; }
     public GltfNodeState colorMultiplier(float red, float green, float blue) {
-        colorMultiplier[0] = nonNegative(red, "Red multiplier");
-        colorMultiplier[1] = nonNegative(green, "Green multiplier");
-        colorMultiplier[2] = nonNegative(blue, "Blue multiplier");
+        float nextRed = nonNegative(red, "Red multiplier");
+        float nextGreen = nonNegative(green, "Green multiplier");
+        float nextBlue = nonNegative(blue, "Blue multiplier");
+        colorMultiplier[0] = nextRed;
+        colorMultiplier[1] = nextGreen;
+        colorMultiplier[2] = nextBlue;
         changed(); return this;
     }
 
@@ -106,7 +115,7 @@ public final class GltfNodeState {
         if (matrix != null) {
             translation = rotation = scale = null;
         }
-        collisionChanged(); return this;
+        transformChanged(); return this;
     }
 
     public float[] localMatrix() { return copy(localMatrix); }
@@ -114,7 +123,7 @@ public final class GltfNodeState {
     /** Multiplies an additional local transform after the resolved authored/animated transform. */
     public GltfNodeState postTransform(float[] matrix) {
         postTransform = matrix == null ? null : matrix(matrix, "Post transform");
-        collisionChanged(); return this;
+        transformChanged(); return this;
     }
 
     public float[] postTransform() { return copy(postTransform); }
@@ -123,7 +132,7 @@ public final class GltfNodeState {
         requireTrsNode();
         translation = finite(new float[]{x, y, z}, "Translation");
         localMatrix = null;
-        collisionChanged(); return this;
+        transformChanged(); return this;
     }
 
     public float[] translation() { return copy(translation); }
@@ -133,7 +142,7 @@ public final class GltfNodeState {
         rotation = finite(new float[]{x, y, z, w}, "Rotation");
         AnimationEvaluator.normalizeQuaternion(rotation);
         localMatrix = null;
-        collisionChanged(); return this;
+        transformChanged(); return this;
     }
 
     public float[] rotation() { return copy(rotation); }
@@ -142,7 +151,7 @@ public final class GltfNodeState {
         requireTrsNode();
         scale = finite(new float[]{x, y, z}, "Scale");
         localMatrix = null;
-        collisionChanged(); return this;
+        transformChanged(); return this;
     }
 
     public float[] scale() { return copy(scale); }
@@ -154,15 +163,34 @@ public final class GltfNodeState {
         if (translation.length != 3 || rotation.length != 4 || scale.length != 3) {
             throw new IllegalArgumentException("TRS transform requires 3 translation, 4 rotation and 3 scale values");
         }
-        translation(translation[0], translation[1], translation[2]);
-        rotation(rotation[0], rotation[1], rotation[2], rotation[3]);
-        scale(scale[0], scale[1], scale[2]);
+        requireTrsNode();
+        float[] nextTranslation = finite(translation.clone(), "Translation");
+        float[] nextRotation = finite(rotation.clone(), "Rotation");
+        float[] nextScale = finite(scale.clone(), "Scale");
+        AnimationEvaluator.normalizeQuaternion(nextRotation);
+        this.translation = nextTranslation;
+        this.rotation = nextRotation;
+        this.scale = nextScale;
+        localMatrix = null;
+        transformChanged();
         return this;
+    }
+
+    public GltfNodeState clearTranslationOverride() {
+        translation = null; transformChanged(); return this;
+    }
+
+    public GltfNodeState clearRotationOverride() {
+        rotation = null; transformChanged(); return this;
+    }
+
+    public GltfNodeState clearScaleOverride() {
+        scale = null; transformChanged(); return this;
     }
 
     public GltfNodeState clearTransformOverrides() {
         localMatrix = postTransform = translation = rotation = scale = null;
-        collisionChanged(); return this;
+        transformChanged(); return this;
     }
 
     public GltfNodeState morphWeights(float... weights) {
@@ -183,13 +211,18 @@ public final class GltfNodeState {
 
     public GltfNodeState parameter(String name, Object value) {
         requireParameterName(name);
-        if (value == null) parameters.remove(name); else parameters.put(name, value);
+        if (value == null) {
+            if (parameters != null) parameters.remove(name);
+        } else {
+            if (parameters == null) parameters = new LinkedHashMap<>();
+            parameters.put(name, value);
+        }
         changed(); return this;
     }
 
     public Optional<Object> parameter(String name) {
         requireParameterName(name);
-        return Optional.ofNullable(parameters.get(name));
+        return Optional.ofNullable(parameters == null ? null : parameters.get(name));
     }
 
     public <T> Optional<T> parameter(String name, Class<T> type) {
@@ -197,18 +230,19 @@ public final class GltfNodeState {
         return parameter(name).filter(type::isInstance).map(type::cast);
     }
 
-    public Map<String, Object> parameters() { return Map.copyOf(parameters); }
+    public Map<String, Object> parameters() { return parameters == null ? Map.of() : Map.copyOf(parameters); }
 
     public GltfNodeState reset() {
-        subtreeVisible = selfVisible = collisionEnabled = castShadows = true;
+        subtreeVisible(true);
+        selfVisible = collisionEnabled = castShadows = true;
         alpha = 1.0f;
         colorMultiplier[0] = colorMultiplier[1] = colorMultiplier[2] = 1.0f;
         lightMode = null;
         cullMode = null;
         localMatrix = postTransform = translation = rotation = scale = morphWeights = null;
-        parameters.clear();
-        for (GltfPrimitiveState primitive : primitives) primitive.reset();
-        collisionChanged();
+        parameters = null;
+        owner.resetPrimitives(index);
+        transformChanged();
         return this;
     }
 
@@ -255,12 +289,12 @@ public final class GltfNodeState {
         return new GltfNodeManager.NodeSnapshot(
             subtreeVisible, selfVisible, collisionEnabled, castShadows, alpha,
             colorMultiplier, lightMode, cullMode, localMatrix, postTransform,
-            translation, rotation, scale, morphWeights, parameters
+            translation, rotation, scale, morphWeights, parameters == null ? Map.of() : parameters
         );
     }
 
     void restore(GltfNodeManager.NodeSnapshot snapshot) {
-        subtreeVisible = snapshot.subtreeVisible();
+        subtreeVisible(snapshot.subtreeVisible());
         selfVisible = snapshot.selfVisible();
         collisionEnabled = snapshot.collisionEnabled();
         castShadows = snapshot.castShadows();
@@ -274,12 +308,12 @@ public final class GltfNodeState {
         rotation = snapshot.rotation();
         scale = snapshot.scale();
         morphWeights = snapshot.morphWeights();
-        parameters.clear();
-        parameters.putAll(snapshot.parameters());
+        parameters = snapshot.parameters().isEmpty() ? null : new LinkedHashMap<>(snapshot.parameters());
+        transformChanged();
     }
 
     private void requireTrsNode() {
-        if (definition().matrix() != null) {
+        if (definition().hasMatrix()) {
             throw new IllegalStateException(
                 "Node " + index + " is matrix-authored; use localMatrix() or postTransform()"
             );
@@ -288,6 +322,10 @@ public final class GltfNodeState {
 
     private void changed() { owner.touch(); }
     private void collisionChanged() { owner.touchCollision(); }
+    private void transformChanged() {
+        owner.transformChanged(index, localMatrix != null || postTransform != null
+            || translation != null || rotation != null || scale != null);
+    }
     private static float[] copy(float[] value) { return value == null ? null : value.clone(); }
 
     private static float[] matrix(float[] values, String label) {

@@ -19,11 +19,20 @@ public final class PoseTransforms {
     }
 
     public static float[] computeWorldMatrices(ModelPose pose) {
-        GltfAsset asset = pose.asset();
+        return computeWorldMatrices(pose.asset(), pose);
+    }
+
+    public static float[] computeBindMatrices(GltfAsset asset) {
+        return computeWorldMatrices(asset, null);
+    }
+
+    private static float[] computeWorldMatrices(GltfAsset asset, ModelPose pose) {
         int nodeCount = asset.nodes().size();
         float[] result = new float[Math.multiplyExact(nodeCount, 16)];
         byte[] state = new byte[nodeCount];
         int[] path = new int[nodeCount];
+        float[] local = new float[16];
+        float[] translation = new float[3], rotation = new float[4], scale = new float[3];
         for (int start = 0; start < nodeCount; start++) {
             if (state[start] == 2) continue;
             int length = 0;
@@ -37,9 +46,19 @@ public final class PoseTransforms {
             for (int pathIndex = length - 1; pathIndex >= 0; pathIndex--) {
                 int nodeId = path[pathIndex];
                 GltfNode node = asset.nodes().get(nodeId);
-                float[] world = localMatrix(node, pose.node(nodeId));
-                if (node.parent() >= 0) world = multiply(slice(result, node.parent()), world);
-                System.arraycopy(world, 0, result, nodeId * 16, 16);
+                if (node.hasMatrix()) {
+                    node.copyMatrixTo(local);
+                } else if (pose != null) {
+                    NodePose value = pose.node(nodeId);
+                    trsMatrixInto(value.translation(), value.rotation(), value.scale(), local, 0);
+                } else {
+                    node.copyTranslationTo(translation);
+                    node.copyRotationTo(rotation);
+                    node.copyScaleTo(scale);
+                    trsMatrixInto(translation, rotation, scale, local, 0);
+                }
+                if (node.parent() < 0) System.arraycopy(local, 0, result, nodeId * 16, 16);
+                else multiplyInto(result, node.parent() * 16, local, 0, result, nodeId * 16);
                 state[nodeId] = 2;
             }
         }
@@ -199,16 +218,6 @@ public final class PoseTransforms {
             }
         }
         return result;
-    }
-
-    private static float[] slice(float[] matrices, int index) {
-        int offset = Math.multiplyExact(index, 16);
-        if (index < 0 || offset + 16 > matrices.length) throw new IndexOutOfBoundsException("matrix index " + index);
-        return Arrays.copyOfRange(matrices, offset, offset + 16);
-    }
-
-    private static float[] identity() {
-        return new float[]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     }
 
     private static final class SkinScratch {

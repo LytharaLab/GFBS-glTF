@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.6.0
+
+### Rendering and materials
+
+- Complete eight scalar LabPBR channels, sparse overrides, independent-UV triangle-chart baking,
+  optional compatible emission packing, and embedded static block/item atlas companions.
+- Route active Iris/Oculus color and shadow draws through the supplied entity buffers, including
+  native triangle tangents, entity IDs, and pipeline render phases.
+- Use Minecraft's opaque transparency state for correct Iris buffer classification.
+- Add native LabPBR 1.3 packed maps and exact numeric channels through `GltfLabPbr`,
+  `GltfMaterialOverride`, and `material.extras.gfbsLabPbr`.
+- Correct glTF normal orientation/scaling and dielectric F0/metal encoding in generated companions.
+  Generate specular mipmaps by channel category and preserve glTF sampler state on every bind.
+- Give each Iris PBR holder independently owned companions that survive shader/resource reloads.
+- Honor opaque texture coverage, mirror triangle winding, normalize transformed normals, use the
+  unlit entity shader, and order blended parts. Make point primitives visible in Minecraft's line mode.
+- Add optional shader-pack entity-shadow frustum integration and conservative fallback.
+
+### Scene performance and control
+
+- Share scene BVHs, bind matrices, repeated mesh GPU geometry, and compatible material layouts.
+- Cull spatial sections inside oversized rigid triangle primitives while retaining source vertex arrays.
+- Add worker-side scene preparation and `GltfRenderer.prepareScene`.
+- Allocate runtime nodes, primitives, poses, and skin palettes on demand. Update only affected
+  transform subtrees and preserve the legacy writable-pose API.
+- Batch tiny parts through Minecraft buffers, bound resident geometry memory, upload textures on first
+  use, and release cold GPU resources and cached RenderTypes.
+- Add rigid `EXT_mesh_gpu_instancing` imports, independently addressable generated instance nodes,
+  model-space node placement, and independent TRS override clearing.
+- Add `GltfLoadLimits` for combined input, decoded arrays, and expanded node counts.
+- Fix quadratic parent-reference validation and eager hierarchy path construction.
+- Bound occlusion queries and fix double projection, stale results, and shader/depth state restoration.
+- Correct collision scene selection, voxel cache invalidation, and retries during asynchronous rebuilds.
+
+### Verification
+
+- Regression tests cover managed and directly edited poses, shared transforms, instance import,
+  configurable limits, and LabPBR channel/mipmap encoding.
+- Real Forge 1.20.1 runs cover vanilla rendering and Oculus 1.7.0/1.8.0 with Embeddium and Complementary,
+  including GPU triangle counts, material readback, resource reload, rotated camera frusta, and shadows.
+- See [performance measurements](docs/PERFORMANCE.md) and [migration notes](docs/MIGRATING-1.6.md).
+
 ## 1.5.1
 
 ### Fixed

@@ -22,8 +22,9 @@ public final class AnimationController {
 
     private final GltfAsset asset;
     private final ModelPose pose;
-    private final ModelPose bind;
-    private final ModelPose scratch;
+    private ModelPose bind;
+    private ModelPose scratch;
+    private boolean poseExposed;
     private final LinkedHashMap<String, Track> tracks = new LinkedHashMap<>();
     private final Map<String, List<AnimationEvent>> events = new HashMap<>();
     private final CopyOnWriteArrayList<AnimationEventListener> listeners = new CopyOnWriteArrayList<>();
@@ -32,8 +33,6 @@ public final class AnimationController {
     public AnimationController(GltfAsset asset) {
         this.asset = Objects.requireNonNull(asset, "asset");
         this.pose = new ModelPose(asset);
-        this.bind = new ModelPose(asset);
-        this.scratch = new ModelPose(asset);
     }
 
     public void play(String animation, PlaybackOptions options) {
@@ -72,7 +71,7 @@ public final class AnimationController {
                 // A late network state may begin after the authoritative clip has already
                 // advanced. Blend the new base layer from its bind pose instead of popping
                 // directly to the delayed clip position. Other mixer layers remain independent.
-                source = bind.copy();
+                source = new ModelPose(asset);
             }
         }
 
@@ -285,8 +284,12 @@ public final class AnimationController {
     }
 
     public ModelPose pose() {
+        poseExposed = true;
         return pose;
     }
+
+    ModelPose poseView() { return pose; }
+    boolean poseExposed() { return poseExposed; }
 
     /** Monotonically increases whenever the evaluated pose changes. */
     public long poseRevision() { return poseRevision; }
@@ -386,6 +389,8 @@ public final class AnimationController {
         pose.reset();
         for (Track track : tracks.values()) {
             if (track.weight <= 0.0f) continue;
+            if (scratch == null) scratch = new ModelPose(asset);
+            if (track.mode == AnimationBlendMode.ADDITIVE && bind == null) bind = new ModelPose(asset);
             sample(track, scratch);
             for (int node = 0; node < pose.nodeCount(); node++) {
                 if (!track.mask.includes(node)) continue;

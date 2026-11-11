@@ -1,6 +1,7 @@
 package org.lytharalab.gfbs.gltf.api.client.material;
 
 import org.lytharalab.gfbs.gltf.api.model.AlphaMode;
+import org.lytharalab.gfbs.gltf.api.model.GltfLabPbr;
 import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfTextureInfo;
 
@@ -33,6 +34,8 @@ public final class GltfMaterialOverride {
     private final Boolean doubleSided;
     private final GltfShadingMode shadingMode;
     private final Float neonStrength;
+    private final GltfLabPbr labPbr;
+    private final GltfLabPbr labPbrChannels;
 
     private GltfMaterialOverride(Builder builder) {
         baseColor = copy(builder.baseColor);
@@ -52,6 +55,8 @@ public final class GltfMaterialOverride {
         doubleSided = builder.doubleSided;
         shadingMode = builder.shadingMode;
         neonStrength = builder.neonStrength;
+        labPbr = builder.labPbr;
+        labPbrChannels = builder.labPbrChannels;
     }
 
     public static Builder builder() { return new Builder(); }
@@ -63,7 +68,8 @@ public final class GltfMaterialOverride {
             && normalTexture == null && normalScale == null && occlusionTexture == null
             && occlusionStrength == null && emissive == null && emissiveTexture == null
             && emissiveStrength == null && alphaMode == null && alphaCutoff == null
-            && doubleSided == null && shadingMode == null && neonStrength == null;
+            && doubleSided == null && shadingMode == null && neonStrength == null && labPbr == null
+            && labPbrChannels == null;
     }
 
     public GltfShadingMode shadingMode() { return shadingMode; }
@@ -91,6 +97,8 @@ public final class GltfMaterialOverride {
     public Optional<Boolean> doubleSided() { return Optional.ofNullable(doubleSided); }
     public Optional<GltfShadingMode> shading() { return Optional.ofNullable(shadingMode); }
     public Optional<Float> neonEmissionStrength() { return Optional.ofNullable(neonStrength); }
+    public Optional<GltfLabPbr> labPbr() { return Optional.ofNullable(labPbr); }
+    public Optional<GltfLabPbr> labPbrChannels() { return Optional.ofNullable(labPbrChannels); }
 
     public Builder toBuilder() {
         Builder builder = new Builder();
@@ -111,6 +119,8 @@ public final class GltfMaterialOverride {
         builder.doubleSided = doubleSided;
         builder.shadingMode = shadingMode;
         builder.neonStrength = neonStrength;
+        builder.labPbr = labPbr;
+        builder.labPbrChannels = labPbrChannels;
         return builder;
     }
 
@@ -166,8 +176,14 @@ public final class GltfMaterialOverride {
             resolvedNormalTexture, resolvedNormalScale,
             resolvedOcclusionTexture, resolvedOcclusionStrength,
             resolvedEmissive, resolvedEmissiveTexture, resolvedEmissiveStrength,
-            resolvedAlphaMode, resolvedAlphaCutoff, resolvedDoubleSided, resolvedUnlit
+            resolvedAlphaMode, resolvedAlphaCutoff, resolvedDoubleSided, resolvedUnlit,
+            resolvedLabPbr(source)
         );
+    }
+
+    private GltfLabPbr resolvedLabPbr(GltfMaterial source) {
+        GltfLabPbr resolved = value(labPbr, source.labPbr());
+        return labPbrChannels == null ? resolved : resolved.overlay(labPbrChannels);
     }
 
     private static float[] copy(float[] value) { return value == null ? null : value.clone(); }
@@ -195,7 +211,9 @@ public final class GltfMaterialOverride {
             && Objects.equals(alphaCutoff, other.alphaCutoff)
             && Objects.equals(doubleSided, other.doubleSided)
             && shadingMode == other.shadingMode
-            && Objects.equals(neonStrength, other.neonStrength);
+            && Objects.equals(neonStrength, other.neonStrength)
+            && Objects.equals(labPbr, other.labPbr)
+            && Objects.equals(labPbrChannels, other.labPbrChannels);
     }
 
     @Override
@@ -205,7 +223,7 @@ public final class GltfMaterialOverride {
             baseColorTexture, metallicFactor, roughnessFactor, metallicRoughnessTexture,
             normalTexture, normalScale, occlusionTexture, occlusionStrength,
             emissiveTexture, emissiveStrength, alphaMode, alphaCutoff, doubleSided,
-            shadingMode, neonStrength
+            shadingMode, neonStrength, labPbr, labPbrChannels
         );
         return 31 * result + Arrays.hashCode(emissive);
     }
@@ -228,6 +246,19 @@ public final class GltfMaterialOverride {
         private Boolean doubleSided;
         private GltfShadingMode shadingMode;
         private Float neonStrength;
+        private GltfLabPbr labPbr;
+        private GltfLabPbr labPbrChannels;
+
+        public Builder labPbr(GltfLabPbr value) {
+            labPbr = Objects.requireNonNull(value, "labPbr");
+            return this;
+        }
+
+        /** Overlays specified channel fields on the inherited/replaced LabPBR material. */
+        public Builder labPbrChannels(GltfLabPbr value) {
+            labPbrChannels = Objects.requireNonNull(value, "labPbrChannels");
+            return this;
+        }
 
         private Builder() {}
 

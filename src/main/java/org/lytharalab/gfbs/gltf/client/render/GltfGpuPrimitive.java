@@ -32,6 +32,8 @@ final class GltfGpuPrimitive implements AutoCloseable {
         DefaultVertexFormat.NEW_ENTITY.getElements().indexOf(DefaultVertexFormat.ELEMENT_UV2);
     private static final ThreadLocal<DrawScratch> DRAW_SCRATCH =
         ThreadLocal.withInitial(DrawScratch::new);
+    private static final ThreadLocal<BufferBuilder> BUILDERS =
+        ThreadLocal.withInitial(() -> new BufferBuilder(8192));
 
     private final VertexBuffer buffer;
 
@@ -40,26 +42,21 @@ final class GltfGpuPrimitive implements AutoCloseable {
     }
 
     static GltfGpuPrimitive compile(GltfPrimitive primitive, GltfMaterial material,
-                                    GltfGeometryPipeline.MaterialPass pass) {
+                                    GltfGeometryPipeline.MaterialPass pass, GltfPrimitiveClusters.Section section) {
         RenderSystem.assertOnRenderThread();
         if (!GltfGeometryPipeline.isTriangleMode(primitive.mode())) {
             throw new IllegalArgumentException("GPU rigid path currently requires triangle geometry");
         }
 
-        long requestedBytes = Math.max(8192L, (long) primitive.indexCount() * 40L);
-        // BufferBuilder grows as needed. Cap the eager allocation so a malformed/huge primitive
-        // cannot force a multi-gigabyte temporary buffer before normal importer limits react.
-        BufferBuilder builder = new BufferBuilder((int) Math.min(2L * 1024L * 1024L, requestedBytes));
-        builder.begin(VertexFormat.Mode.TRIANGLES, GltfRenderTypes.REQUIRED_FORMAT);
-        GltfGeometryPipeline.emit(
-            builder, primitive, material, pass,
-            IDENTITY4, IDENTITY3,
-            null, 0, null,
-            0, 0, 1.0f
-        );
-
-        VertexBuffer vertexBuffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+        BufferBuilder builder = BUILDERS.get();
+        VertexBuffer vertexBuffer = null;
         try {
+            builder.begin(VertexFormat.Mode.TRIANGLES, GltfRenderTypes.REQUIRED_FORMAT);
+            GltfGeometryPipeline.emit(
+                builder, primitive, material, pass,
+                IDENTITY4, IDENTITY3, null, 0, null, 0, 0, 1.0f, section
+            );
+            vertexBuffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
             vertexBuffer.bind();
             vertexBuffer.upload(builder.end());
             // upload() is allowed to touch binding state; bind explicitly before mutating the VAO.
@@ -73,13 +70,22 @@ final class GltfGpuPrimitive implements AutoCloseable {
             return new GltfGpuPrimitive(vertexBuffer);
         } catch (RuntimeException | Error failure) {
             try {
+                if (builder.building()) builder.end().release();
                 VertexBuffer.unbind();
-                vertexBuffer.close();
+                if (vertexBuffer != null) vertexBuffer.close();
             } catch (RuntimeException | Error cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
             }
             throw failure;
         }
+    }
+
+    static long estimatedBytes(GltfPrimitive primitive) {
+        long vertices = primitive.indexCount();
+        if (primitive.mode() != org.lytharalab.gfbs.gltf.api.model.PrimitiveMode.TRIANGLES) {
+            vertices = Math.max(0, vertices - 2) * 3;
+        }
+        return vertices * GltfRenderTypes.REQUIRED_FORMAT.getVertexSize();
     }
 
     void draw(RenderType renderType, Matrix4f modelView, boolean transformDirectionalLights,
@@ -102,10 +108,10 @@ final class GltfGpuPrimitive implements AutoCloseable {
                     scratch.localLight1.set(scratch.savedLight1);
                     scratch.inverseModel.transform(scratch.localLight0);
                     scratch.inverseModel.transform(scratch.localLight1);
-                    // The streamed path writes inverse-transpose transformed normals. Moving that
-                    // transform onto the shader light requires L_local = inverse(M) * L. Do not
-                    // normalize here: non-uniform scale would otherwise change the dot product and
-                    // make the resident path shade differently from the legacy CPU path.
+                    // Resident lighting is used for conformal transforms. Remove uniform scale
+                    // so it agrees with the streamed path's normalized inverse-transpose normals.
+                    restoreLightLength(scratch.localLight0, scratch.savedLight0);
+                    restoreLightLength(scratch.localLight1, scratch.savedLight1);
                     RenderSystem.setShaderLights(scratch.localLight0, scratch.localLight1);
                     scratch.lightsChanged = true;
                 }
@@ -162,6 +168,11 @@ final class GltfGpuPrimitive implements AutoCloseable {
                 scratch.colorChanged = false;
             }
         }
+    }
+
+    private static void restoreLightLength(Vector3f transformed, Vector3f source) {
+        float length = transformed.lengthSquared();
+        if (length > 0) transformed.mul((float) Math.sqrt(source.lengthSquared() / length));
     }
 
     @Override

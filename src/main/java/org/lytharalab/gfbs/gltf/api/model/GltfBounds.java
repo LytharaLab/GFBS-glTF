@@ -46,9 +46,9 @@ public record GltfBounds(float minX, float minY, float minZ,
         return minX <= maxX && minY <= maxY && minZ <= maxZ;
     }
 
-    public float centerX() { return (minX + maxX) * 0.5f; }
-    public float centerY() { return (minY + maxY) * 0.5f; }
-    public float centerZ() { return (minZ + maxZ) * 0.5f; }
+    public float centerX() { return minX * 0.5f + maxX * 0.5f; }
+    public float centerY() { return minY * 0.5f + maxY * 0.5f; }
+    public float centerZ() { return minZ * 0.5f + maxZ * 0.5f; }
 
     public float radius() {
         if (!valid()) return 0.0f;

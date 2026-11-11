@@ -10,6 +10,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.resources.ResourceLocation;
 import org.lwjgl.opengl.GL11;
+import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -28,9 +29,8 @@ public final class GltfRenderTypes {
     public static final int ORDER_EMISSIVE = 1100;
     public static final VertexFormat REQUIRED_FORMAT = DefaultVertexFormat.NEW_ENTITY;
 
-    private static final int BUFFER_SIZE = 2 * 1024 * 1024;
-    private static final RenderStateShard.TransparencyStateShard NO_TRANSPARENCY =
-        new RenderStateShard.TransparencyStateShard("gfbs_gltf_none", () -> { }, () -> { });
+    private static final int BUFFER_SIZE = 64 * 1024;
+    private static final RenderStateShard.TransparencyStateShard NO_TRANSPARENCY = VanillaState.OPAQUE;
     private static final RenderStateShard.TransparencyStateShard TRANSLUCENT =
         new RenderStateShard.TransparencyStateShard("gfbs_gltf_translucent", () -> {
             RenderSystem.enableBlend();
@@ -77,6 +77,20 @@ public final class GltfRenderTypes {
     private GltfRenderTypes() {
     }
 
+    /** Releases cached built-in types when a runtime texture leaves the GPU cache. */
+    public static synchronized void forgetTexture(ResourceLocation texture) {
+        RenderType[] types = STANDARD_CACHE.remove(texture);
+        if (types != null) {
+            for (RenderType type : types) if (type != null) ORDER.remove(type);
+        }
+    }
+
+    private static final class VanillaState extends RenderStateShard {
+        private static final TransparencyStateShard OPAQUE = NO_TRANSPARENCY;
+
+        private VanillaState() { super("gfbs_gltf_vanilla", () -> {}, () -> {}); }
+    }
+
     public static RenderType solid(ResourceLocation texture, boolean cull) {
         return standard("solid", texture, cull, GameRenderer::getRendertypeEntitySolidShader,
             NO_TRANSPARENCY, ORDER_SOLID, true, VertexFormat.Mode.TRIANGLES);
@@ -108,8 +122,14 @@ public final class GltfRenderTypes {
             translucent ? TRANSLUCENT : NO_TRANSPARENCY,
             translucent ? ORDER_TRANSLUCENT : ORDER_SOLID,
             !translucent,
-            VertexFormat.Mode.LINES
+            VertexFormat.Mode.DEBUG_LINES
         );
+    }
+
+    public static RenderType unlit(ResourceLocation texture, boolean cull, boolean translucent) {
+        return standard(translucent ? "translucent_unlit" : "unlit", texture, cull,
+            GameRenderer::getRendertypeEyesShader, translucent ? TRANSLUCENT : NO_TRANSPARENCY,
+            translucent ? ORDER_TRANSLUCENT : ORDER_SOLID, !translucent, VertexFormat.Mode.TRIANGLES);
     }
 
     /**
@@ -117,15 +137,28 @@ public final class GltfRenderTypes {
      */
     public static RenderType emissive(ResourceLocation texture, boolean cull,
                                       boolean lineGeometry) {
+        return emissive(texture, cull, lineGeometry ? PrimitiveMode.LINES : PrimitiveMode.TRIANGLES, false);
+    }
+
+    public static RenderType emissive(ResourceLocation texture, boolean cull,
+                                      PrimitiveMode primitive, boolean masked) {
+        VertexFormat.Mode mode = switch (primitive) {
+            case TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN -> VertexFormat.Mode.TRIANGLES;
+            default -> VertexFormat.Mode.DEBUG_LINES;
+        };
+        String kind = switch (mode) {
+            case TRIANGLES -> masked ? "emissive_masked" : "emissive";
+            default -> masked ? "emissive_lines_masked" : "emissive_lines";
+        };
         return standard(
-            lineGeometry ? "emissive_lines" : "emissive",
+            kind,
             texture,
-            cull && !lineGeometry,
-            GameRenderer::getRendertypeEntityTranslucentShader,
+            cull && mode == VertexFormat.Mode.TRIANGLES,
+            GameRenderer::getRendertypeEyesShader,
             EMISSIVE_ADDITIVE,
             ORDER_EMISSIVE,
             false,
-            lineGeometry ? VertexFormat.Mode.LINES : VertexFormat.Mode.TRIANGLES
+            mode
         );
     }
 
@@ -151,7 +184,7 @@ public final class GltfRenderTypes {
                                        int order, boolean writeDepth, VertexFormat.Mode mode) {
         Objects.requireNonNull(texture, "texture");
         int slot = standardSlot(kind, cull);
-        RenderType[] cached = STANDARD_CACHE.computeIfAbsent(texture, ignored -> new RenderType[16]);
+        RenderType[] cached = STANDARD_CACHE.computeIfAbsent(texture, ignored -> new RenderType[32]);
         RenderType existing = cached[slot];
         if (existing != null) return existing;
 
@@ -160,6 +193,9 @@ public final class GltfRenderTypes {
             .setTextureState(new RenderStateShard.TextureStateShard(texture, false, false))
             .setTransparencyState(transparency)
             .setCullState(new RenderStateShard.CullStateShard(cull))
+            .setDepthTestState(new RenderStateShard.DepthTestStateShard(
+                kind.endsWith("_masked") ? "equal" : "lequal",
+                kind.endsWith("_masked") ? GL11.GL_EQUAL : GL11.GL_LEQUAL))
             .setLightmapState(new RenderStateShard.LightmapStateShard(true))
             .setOverlayState(new RenderStateShard.OverlayStateShard(true))
             .setWriteMaskState(new RenderStateShard.WriteMaskStateShard(true, writeDepth))
@@ -171,7 +207,7 @@ public final class GltfRenderTypes {
             mode,
             BUFFER_SIZE,
             true,
-            kind.equals("translucent"),
+            false, // Minecraft 1.20.1 only sorts QUADS; triangles are ordered by the renderer.
             state
         );
         ORDER.put(type, order);
@@ -188,6 +224,10 @@ public final class GltfRenderTypes {
             case "translucent_lines" -> 8;
             case "emissive" -> 10;
             case "emissive_lines" -> 12;
+            case "emissive_masked" -> 14;
+            case "emissive_lines_masked" -> 16;
+            case "unlit" -> 18;
+            case "translucent_unlit" -> 20;
             default -> throw new IllegalArgumentException("Unknown standard glTF RenderType: " + kind);
         };
         return base + (cull ? 1 : 0);

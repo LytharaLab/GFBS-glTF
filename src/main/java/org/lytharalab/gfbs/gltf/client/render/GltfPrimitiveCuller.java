@@ -1,6 +1,7 @@
 package org.lytharalab.gfbs.gltf.client.render;
 
 import net.minecraft.client.renderer.culling.Frustum;
+import net.minecraft.world.phys.AABB;
 import org.joml.Matrix4f;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderContext;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderOptions;
@@ -24,23 +25,39 @@ final class GltfPrimitiveCuller {
                              GltfRenderContext context, GltfRenderOptions options,
                              boolean dynamicGeometry) {
         if (context == null || dynamicGeometry) return true;
-        GltfBounds source = primitive.bounds();
+        return isVisible(primitive.bounds(), modelView, context, options);
+    }
+
+    static boolean isVisible(GltfBounds source, Matrix4f modelView,
+                             GltfRenderContext context, GltfRenderOptions options) {
+        return isVisible(source, modelView, context, options, false);
+    }
+
+    static boolean isVisible(GltfBounds source, Matrix4f modelView, GltfRenderContext context,
+                             GltfRenderOptions options, boolean shadowPass) {
+        if (!enabled(context, options, shadowPass)) return true;
         if (!source.valid()) return true;
 
         BoundsScratch bounds = SCRATCH.get();
-        transform(source, modelView, bounds);
-        if (options.maxRenderDistance() > 0.0) {
-            double x = (bounds.minX + bounds.maxX) * 0.5;
-            double y = (bounds.minY + bounds.maxY) * 0.5;
-            double z = (bounds.minZ + bounds.maxZ) * 0.5;
-            double hx = (bounds.maxX - bounds.minX) * 0.5;
-            double hy = (bounds.maxY - bounds.minY) * 0.5;
-            double hz = (bounds.maxZ - bounds.minZ) * 0.5;
-            double maximum = options.maxRenderDistance() + Math.sqrt(hx * hx + hy * hy + hz * hz);
+        Frustum frustum = context.frustum();
+        Matrix4f axes = modelView;
+        if (options.frustumCulling() && frustum != null && context.viewToWorldView() != null) {
+            axes = bounds.worldAxes.set(context.viewToWorldView()).mul(modelView);
+        }
+        transform(source, axes, bounds);
+        if (!shadowPass && options.maxRenderDistance() > 0.0) {
+            double x = Math.max(0, Math.max(bounds.minX, -bounds.maxX));
+            double y = Math.max(0, Math.max(bounds.minY, -bounds.maxY));
+            double z = Math.max(0, Math.max(bounds.minZ, -bounds.maxZ));
+            double maximum = options.maxRenderDistance();
             if (x * x + y * y + z * z > maximum * maximum) return false;
         }
-        Frustum frustum = context.frustum();
         if (options.frustumCulling() && frustum != null) {
+            if (frustum.getClass() != Frustum.class) {
+                return frustum.isVisible(new AABB(
+                    bounds.minX + context.cameraX(), bounds.minY + context.cameraY(), bounds.minZ + context.cameraZ(),
+                    bounds.maxX + context.cameraX(), bounds.maxY + context.cameraY(), bounds.maxZ + context.cameraZ()));
+            }
             // modelView is camera-relative, while Frustum.cubeInFrustum accepts world-space
             // coordinates and subtracts its own camera origin internally. Preserve the old
             // GltfBounds.minecraft(cameraX, cameraY, cameraZ) semantics without allocating AABB.
@@ -56,31 +73,35 @@ final class GltfPrimitiveCuller {
         return true;
     }
 
+    static boolean enabled(GltfRenderContext context, GltfRenderOptions options) {
+        return enabled(context, options, false);
+    }
+
+    static boolean enabled(GltfRenderContext context, GltfRenderOptions options, boolean shadowPass) {
+        return context != null && (!shadowPass && options.maxRenderDistance() > 0.0
+            || options.frustumCulling() && context.frustum() != null);
+    }
+
     private static void transform(GltfBounds bounds, Matrix4f matrix, BoundsScratch output) {
-        float minX = bounds.minX(), minY = bounds.minY(), minZ = bounds.minZ();
-        float maxX = bounds.maxX(), maxY = bounds.maxY(), maxZ = bounds.maxZ();
-        double outMinX = Double.POSITIVE_INFINITY;
-        double outMinY = Double.POSITIVE_INFINITY;
-        double outMinZ = Double.POSITIVE_INFINITY;
-        double outMaxX = Double.NEGATIVE_INFINITY;
-        double outMaxY = Double.NEGATIVE_INFINITY;
-        double outMaxZ = Double.NEGATIVE_INFINITY;
-        for (int corner = 0; corner < 8; corner++) {
-            double x = (corner & 1) == 0 ? minX : maxX;
-            double y = (corner & 2) == 0 ? minY : maxY;
-            double z = (corner & 4) == 0 ? minZ : maxZ;
-            double tx = matrix.m00() * x + matrix.m10() * y + matrix.m20() * z + matrix.m30();
-            double ty = matrix.m01() * x + matrix.m11() * y + matrix.m21() * z + matrix.m31();
-            double tz = matrix.m02() * x + matrix.m12() * y + matrix.m22() * z + matrix.m32();
-            outMinX = Math.min(outMinX, tx); outMaxX = Math.max(outMaxX, tx);
-            outMinY = Math.min(outMinY, ty); outMaxY = Math.max(outMaxY, ty);
-            outMinZ = Math.min(outMinZ, tz); outMaxZ = Math.max(outMaxZ, tz);
-        }
-        output.minX = outMinX; output.minY = outMinY; output.minZ = outMinZ;
-        output.maxX = outMaxX; output.maxY = outMaxY; output.maxZ = outMaxZ;
+        double x = ((double) bounds.minX() + bounds.maxX()) * 0.5;
+        double y = ((double) bounds.minY() + bounds.maxY()) * 0.5;
+        double z = ((double) bounds.minZ() + bounds.maxZ()) * 0.5;
+        double hx = ((double) bounds.maxX() - bounds.minX()) * 0.5;
+        double hy = ((double) bounds.maxY() - bounds.minY()) * 0.5;
+        double hz = ((double) bounds.maxZ() - bounds.minZ()) * 0.5;
+        double cx = matrix.m00() * x + matrix.m10() * y + matrix.m20() * z + matrix.m30();
+        double cy = matrix.m01() * x + matrix.m11() * y + matrix.m21() * z + matrix.m31();
+        double cz = matrix.m02() * x + matrix.m12() * y + matrix.m22() * z + matrix.m32();
+        double ex = Math.abs(matrix.m00()) * hx + Math.abs(matrix.m10()) * hy + Math.abs(matrix.m20()) * hz;
+        double ey = Math.abs(matrix.m01()) * hx + Math.abs(matrix.m11()) * hy + Math.abs(matrix.m21()) * hz;
+        double ez = Math.abs(matrix.m02()) * hx + Math.abs(matrix.m12()) * hy + Math.abs(matrix.m22()) * hz;
+        output.minX = cx - ex; output.maxX = cx + ex;
+        output.minY = cy - ey; output.maxY = cy + ey;
+        output.minZ = cz - ez; output.maxZ = cz + ez;
     }
 
     private static final class BoundsScratch {
+        final Matrix4f worldAxes = new Matrix4f();
         double minX, minY, minZ, maxX, maxY, maxZ;
     }
 }

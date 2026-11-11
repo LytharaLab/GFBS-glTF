@@ -78,6 +78,9 @@ public final class ClientGltfModels implements GltfModelManager, ResourceManager
             try {
                 GltfAsset asset = ModelImporters.load(id, child -> manager.getResource(child)
                     .orElseThrow(() -> new FileNotFoundException(child.toString())).open());
+                if (asset.defaultScene() >= 0 && generation.get() == expectedGeneration) {
+                    GltfGpuCache.prepareScene(asset, asset.defaultScene());
+                }
                 if (generation.get() != expectedGeneration) {
                     throw new CancellationException("Client resources were reloaded while loading " + id);
                 }

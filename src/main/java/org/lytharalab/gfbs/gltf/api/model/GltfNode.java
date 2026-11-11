@@ -64,6 +64,10 @@ public final class GltfNode {
     public int parent() { return parent; }
     public int[] children() { return children.clone(); }
     public int[] meshes() { return meshes.clone(); }
+    public int childCount() { return children.length; }
+    public int child(int index) { return children[index]; }
+    public int meshCount() { return meshes.length; }
+    public int mesh(int index) { return meshes[index]; }
     public int skin() { return skin; }
     public float[] matrix() { return matrix == null ? null : matrix.clone(); }
     public boolean hasMatrix() { return matrix != null; }

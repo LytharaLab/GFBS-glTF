@@ -1,6 +1,7 @@
 package org.lytharalab.gfbs.gltf.api.client;
 
 import net.minecraft.resources.ResourceLocation;
+import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
 import org.lytharalab.gfbs.gltf.api.animation.ModelPose;
 import org.lytharalab.gfbs.gltf.api.client.material.GltfMaterialOverride;
@@ -18,6 +19,7 @@ import org.lytharalab.gfbs.gltf.api.model.GltfScene;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
 
 import java.util.List;
+import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -111,6 +113,43 @@ class GltfNodeManagerTest {
         float[] second = nodes.computeWorldMatricesView(pose, 0L);
         assertSame(first, second);
         assertEquals(7.0f, second[12]);
+    }
+
+    @Test
+    void sharesBindMatricesAndUpdatesOnlyTheAffectedPlacement() {
+        GltfAsset asset = asset();
+        GltfInstance first = new GltfInstance(asset);
+        GltfInstance other = new GltfInstance(asset);
+        float[] shared = first.nodes().computeWorldMatricesView(first.animations());
+        assertSame(shared, other.nodes().computeWorldMatricesView(other.animations()));
+
+        first.setNodeModelMatrix(1, new Matrix4f().translation(8, 0, 0).get(new float[16]));
+        assertEquals(8.0f, first.nodeModelMatrix(1)[12]);
+        first.nodes().node(0).translation(2, 0, 0);
+        assertEquals(10.0f, first.nodeModelMatrix(1)[12]);
+        assertEquals(1.0f, other.nodeModelMatrix(1)[12]);
+
+        List<Integer> moved = new ArrayList<>();
+        first.nodes().forEachMovedNode(first.animations(), moved::add);
+        assertEquals(List.of(0, 1), moved);
+        first.nodes().node(0).clearTranslationOverride();
+        first.nodes().node(1).clearTransformOverrides();
+        assertSame(shared, first.nodes().computeWorldMatricesView(first.animations()));
+    }
+
+    @Test
+    void legacyEditableControllerPoseAndVisibilityRemainObservable() {
+        GltfInstance instance = new GltfInstance(asset());
+        instance.nodeModelMatrix(1);
+        ModelPose pose = instance.animations().pose();
+        pose.node(0).translation()[0] = 6;
+        assertEquals(7.0f, instance.nodeModelMatrix(1)[12]);
+
+        instance.nodes().node(0).subtreeVisible(false);
+        assertFalse(instance.nodes().isSubtreeVisible(1));
+        assertTrue(instance.nodeVisible(1));
+        instance.nodes().node(0).subtreeVisible(true);
+        assertTrue(instance.nodes().isSubtreeVisible(1));
     }
 
     private static GltfAsset asset() {

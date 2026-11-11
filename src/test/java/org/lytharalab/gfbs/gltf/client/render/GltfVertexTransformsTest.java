@@ -1,6 +1,7 @@
 package org.lytharalab.gfbs.gltf.client.render;
 
 import org.junit.jupiter.api.Test;
+import org.joml.Matrix4f;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.MorphTarget;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
@@ -9,8 +10,17 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GltfVertexTransformsTest {
+    @Test
+    void residentLightingRequiresAConformalTransform() {
+        assertTrue(GltfVertexTransforms.conformal(new Matrix4f().rotateXYZ(0.5f, 1.0f, 0.2f).scale(0.5f)));
+        assertFalse(GltfVertexTransforms.conformal(new Matrix4f().scale(1, 2, 1)));
+        assertFalse(GltfVertexTransforms.conformal(new Matrix4f().m10(0.4f)));
+        assertFalse(GltfVertexTransforms.conformal(new Matrix4f().scale(0)));
+    }
     @Test
     void preparesPositionNormalAndTangentMorphsWithoutMutatingTheAsset() {
         float[] positions = {

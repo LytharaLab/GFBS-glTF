@@ -1,5 +1,6 @@
 package org.lytharalab.gfbs.gltf.client.render;
 
+import org.joml.Matrix4f;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitiveAccess;
 import org.lytharalab.gfbs.gltf.api.model.MorphTarget;
@@ -13,6 +14,25 @@ public final class GltfVertexTransforms {
 
     private GltfVertexTransforms() {
     }
+
+    /** Whether normalized normal lighting can be moved into uniform shader-light directions. */
+    static boolean conformal(Matrix4f matrix) {
+        double xx = square(matrix.m00()) + square(matrix.m01()) + square(matrix.m02());
+        double yy = square(matrix.m10()) + square(matrix.m11()) + square(matrix.m12());
+        double zz = square(matrix.m20()) + square(matrix.m21()) + square(matrix.m22());
+        double maximum = Math.max(xx, Math.max(yy, zz));
+        if (!(maximum > 1.0e-20 && Double.isFinite(maximum))) return false;
+        double tolerance = maximum * 0.0001;
+        return Math.abs(xx - yy) <= tolerance && Math.abs(xx - zz) <= tolerance
+            && Math.abs((double) matrix.m00() * matrix.m10() + (double) matrix.m01() * matrix.m11()
+                + (double) matrix.m02() * matrix.m12()) <= tolerance
+            && Math.abs((double) matrix.m00() * matrix.m20() + (double) matrix.m01() * matrix.m21()
+                + (double) matrix.m02() * matrix.m22()) <= tolerance
+            && Math.abs((double) matrix.m10() * matrix.m20() + (double) matrix.m11() * matrix.m21()
+                + (double) matrix.m12() * matrix.m22()) <= tolerance;
+    }
+
+    private static double square(float value) { return (double) value * value; }
 
     public static PreparedGeometry prepare(GltfPrimitive primitive, float[] morphWeights) {
         // This method is public and historically returned writable copies. Keep that ownership

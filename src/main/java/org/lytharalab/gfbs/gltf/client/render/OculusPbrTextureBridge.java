@@ -18,17 +18,16 @@ final class OculusPbrTextureBridge {
         if (!OculusCompat.installed()) return false;
         try {
             ClassLoader loader = OculusPbrTextureBridge.class.getClassLoader();
-            Class<?> registryType = Class.forName(
-                "net.irisshaders.iris.texture.pbr.loader.PBRTextureLoaderRegistry", false, loader);
-            Class<?> pbrLoaderType = Class.forName(
-                "net.irisshaders.iris.texture.pbr.loader.PBRTextureLoader", false, loader);
+            String prefix = OculusCompat.namespace() + ".texture.pbr.loader.";
+            Class<?> registryType = Class.forName(prefix + "PBRTextureLoaderRegistry", false, loader);
+            Class<?> pbrLoaderType = Class.forName(prefix + "PBRTextureLoader", false, loader);
             Object registry = registryType.getField("INSTANCE").get(null);
             Object proxy = Proxy.newProxyInstance(loader, new Class<?>[]{pbrLoaderType}, OculusPbrTextureBridge::invokeLoader);
             registryType.getMethod("register", Class.class, pbrLoaderType)
                 .invoke(registry, GltfMaterialTexture.class, proxy);
             available = true;
         } catch (ReflectiveOperationException | LinkageError exception) {
-            GFBSglTF.LOGGER.warn("Unable to register glTF LabPBR textures with Oculus; "
+            GFBSglTF.LOGGER.warn("Unable to register glTF LabPBR textures with Iris/Oculus; "
                 + "shader-pack rendering will retain geometry and light compatibility but use default PBR maps", exception);
         }
         return available;
@@ -47,10 +46,23 @@ final class OculusPbrTextureBridge {
         GltfMaterialTexture texture = (GltfMaterialTexture) args[0];
         Object consumer = args[2];
         Class<?> consumerType = method.getParameterTypes()[2];
-        consumerType.getMethod("acceptNormalTexture",
-            net.minecraft.client.renderer.texture.AbstractTexture.class).invoke(consumer, texture.normalTexture());
-        consumerType.getMethod("acceptSpecularTexture",
-            net.minecraft.client.renderer.texture.AbstractTexture.class).invoke(consumer, texture.specularTexture());
+        Method normalMethod = consumerType.getMethod("acceptNormalTexture",
+            net.minecraft.client.renderer.texture.AbstractTexture.class);
+        Method specularMethod = consumerType.getMethod("acceptSpecularTexture",
+            net.minecraft.client.renderer.texture.AbstractTexture.class);
+        GltfUploadedTexture normal = null;
+        GltfUploadedTexture specular = null;
+        try {
+            normal = texture.loadNormal();
+            specular = texture.loadSpecular();
+            normalMethod.invoke(consumer, normal);
+            normal = null; // Ownership passed to the holder.
+            specularMethod.invoke(consumer, specular);
+            specular = null;
+        } finally {
+            if (normal != null) normal.close();
+            if (specular != null) specular.close();
+        }
         return null;
     }
 }

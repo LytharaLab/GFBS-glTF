@@ -6,6 +6,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
+import org.lytharalab.gfbs.gltf.api.animation.AnimationPoseAccess;
 import org.lytharalab.gfbs.gltf.api.animation.ModelPose;
 import org.lytharalab.gfbs.gltf.api.client.GltfInstance;
 import org.lytharalab.gfbs.gltf.api.client.node.GltfPrimitiveKey;
@@ -47,16 +48,16 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     private volatile Level level;
     private volatile long buildingSignature;
     private boolean registered;
-    private boolean dirty = true;
-    private long signature = Long.MIN_VALUE;
+    private volatile boolean dirty = true;
+    private volatile long signature = Long.MIN_VALUE;
+    private long voxelOptionsSignature = Long.MIN_VALUE;
     private long selectionSignature = Long.MIN_VALUE;
     private boolean[] selectedNodes;
     private boolean[] hiddenNodes;
+    private boolean hasHiddenNodes;
 
     public GltfCollider(GltfInstance instance) {
         this.instance = instance;
-        selectedNodes = new boolean[instance.asset().nodes().size()];
-        hiddenNodes = new boolean[selectedNodes.length];
     }
 
     public CollisionOptions options() { return options; }
@@ -87,7 +88,9 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     public GltfCollider disable() {
         options.enabled(false);
         shape = GltfCollisionShape.EMPTY;
-        Arrays.fill(hiddenNodes, false);
+        hasHiddenNodes = false;
+        selectionSignature = Long.MIN_VALUE;
+        buildingSignature = Long.MIN_VALUE;
         if (registered) {
             GltfCollisionManager.unregister(this);
             registered = false;
@@ -122,7 +125,17 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     }
 
     public boolean isNodeHidden(int nodeIndex) {
-        return nodeIndex >= 0 && nodeIndex < hiddenNodes.length && hiddenNodes[nodeIndex];
+        return hasHiddenNodes && options.enabled()
+            && nodeIndex >= 0 && nodeIndex < hiddenNodes.length && hiddenNodes[nodeIndex];
+    }
+
+    /** Whether this node is suppressed by a collision group on it or on an ancestor. */
+    public boolean isInHiddenSubtree(int nodeIndex) {
+        if (!hasHiddenNodes || !options.enabled()) return false;
+        for (int node = nodeIndex; node >= 0; node = instance.asset().nodes().get(node).parent()) {
+            if (hiddenNodes[node]) return true;
+        }
+        return false;
     }
 
     public void update() {
@@ -130,15 +143,20 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
             shape = GltfCollisionShape.EMPTY;
             return;
         }
+        if (instance.scene() < 0) return;
         refreshSelection();
-        ModelPose pose = instance.animations().pose();
-        float[] world = instance.nodes().computeWorldMatricesView(
-            pose, instance.animations().poseRevision()
-        );
+        ModelPose pose = AnimationPoseAccess.pose(instance.animations());
+        float[] world = instance.nodes().computeWorldMatricesView(instance.animations());
         long currentSignature = computeSignature(world, pose);
         if (!dirty && currentSignature == signature) return;
         signature = currentSignature;
+        buildingSignature = currentSignature;
         dirty = false;
+        long currentOptions = options.signature();
+        if (voxelOptionsSignature != currentOptions) {
+            voxelOptionsSignature = currentOptions;
+            localBoxCache.clear();
+        }
         try {
             switch (options.mode()) {
                 case BOUNDS -> shape = buildBounds(world);
@@ -151,34 +169,29 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     }
 
     private void refreshSelection() {
-        long current = options.groups().hashCode() * 31L
-            + Boolean.hashCode(options.includeDescendants());
+        Set<String> groups = options.groups();
+        long current = groups.hashCode() * 961L + Boolean.hashCode(options.includeDescendants()) * 31L
+            + Boolean.hashCode(options.hideColliderNodes());
         if (selectionSignature == current) return;
         selectionSignature = current;
-        Arrays.fill(selectedNodes, false);
-        Arrays.fill(hiddenNodes, false);
         GltfAsset asset = instance.asset();
-        Set<String> groups = options.groups();
-        if (groups.isEmpty()) {
-            Arrays.fill(selectedNodes, true);
-        } else {
-            for (int root : asset.scenes().get(instance.scene()).roots()) {
-                selectRecursive(root, false, groups);
-            }
-            if (options.hideColliderNodes()) {
-                System.arraycopy(selectedNodes, 0, hiddenNodes, 0, selectedNodes.length);
+        if (selectedNodes == null) selectedNodes = new boolean[asset.nodes().size()];
+        else Arrays.fill(selectedNodes, false);
+        ArrayDeque<Integer> pending = new ArrayDeque<>();
+        for (int root : asset.scenes().get(instance.scene()).roots()) pending.push(root);
+        while (!pending.isEmpty()) {
+            int index = pending.pop();
+            GltfNode node = asset.nodes().get(index);
+            selectedNodes[index] = groups.isEmpty() || groups.contains(node.name())
+                || (options.includeDescendants() && node.parent() >= 0 && selectedNodes[node.parent()]);
+            for (int i = 0; i < node.childCount(); i++) {
+                pending.push(node.child(i));
             }
         }
+        hasHiddenNodes = !groups.isEmpty() && options.hideColliderNodes();
+        hiddenNodes = hasHiddenNodes ? selectedNodes : null;
         localBoxCache.clear();
         dirty = true;
-    }
-
-    private void selectRecursive(int nodeIndex, boolean inherited, Set<String> groups) {
-        GltfNode node = instance.asset().nodes().get(nodeIndex);
-        boolean selected = groups.contains(node.name())
-            || (inherited && options.includeDescendants());
-        selectedNodes[nodeIndex] = selected;
-        for (int child : node.children()) selectRecursive(child, selected, groups);
     }
 
     private GltfCollisionShape buildBounds(float[] world) {
@@ -219,6 +232,10 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
     }
 
     private void buildPrecise(float[] world, ModelPose pose, long expectedSignature) {
+        if (building.get()) {
+            dirty = true;
+            return;
+        }
         List<float[]> chunks = new ArrayList<>();
         int[] size = new int[1];
         GltfAsset asset = instance.asset();
@@ -233,7 +250,7 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
             if (node.skin() >= 0 && joints != null && weights != null) {
                 GltfSkin skin = asset.skins().get(node.skin());
                 float[] palette = instance.nodes().computeSkinPaletteView(
-                    skin, nodeIndex, pose, instance.animations().poseRevision()
+                    skin, nodeIndex, world
                 );
                 skinPositions(positions, joints, weights, palette, GltfSkinAccess.joints(skin).length);
             }
@@ -271,14 +288,25 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
             return;
         }
         buildingSignature = expectedSignature;
-        if (!building.compareAndSet(false, true)) return;
-        GltfCollisionManager.submit(() -> {
-            try {
-                build.run();
-            } finally {
-                building.set(false);
-            }
-        });
+        if (!building.compareAndSet(false, true)) {
+            dirty = true;
+            return;
+        }
+        try {
+            GltfCollisionManager.submit(() -> {
+                try {
+                    build.run();
+                } catch (RuntimeException failure) {
+                    dirty = true;
+                } finally {
+                    building.set(false);
+                }
+            });
+        } catch (RuntimeException failure) {
+            building.set(false);
+            dirty = true;
+            throw failure;
+        }
     }
 
     private long computeSignature(float[] world, ModelPose pose) {
@@ -343,44 +371,27 @@ public final class GltfCollider implements ClippableSource, AutoCloseable {
 
     private static float[] expandTriangles(GltfPrimitive primitive, float[] positions) {
         int[] indices = GltfPrimitiveAccess.indices(primitive);
-        if (indices == null) {
-            indices = new int[primitive.vertexCount()];
-            for (int i = 0; i < indices.length; i++) indices[i] = i;
-        }
-        List<Integer> triangles = new ArrayList<>();
-        switch (primitive.mode()) {
-            case TRIANGLES -> {
-                for (int index : indices) triangles.add(index);
-            }
-            case TRIANGLE_STRIP -> {
-                for (int i = 2; i < indices.length; i++) {
-                    int a = indices[i - 2];
-                    int b = indices[i - 1];
-                    if ((i & 1) != 0) {
-                        int swap = a;
-                        a = b;
-                        b = swap;
-                    }
-                    triangles.add(a);
-                    triangles.add(b);
-                    triangles.add(indices[i]);
+        int count = primitive.indexCount();
+        int triangles = switch (primitive.mode()) {
+            case TRIANGLES -> count / 3;
+            case TRIANGLE_STRIP, TRIANGLE_FAN -> Math.max(0, count - 2);
+            default -> 0;
+        };
+        float[] expanded = new float[Math.multiplyExact(triangles, 9)];
+        for (int triangle = 0; triangle < triangles; triangle++) {
+            int a, b, c;
+            if (primitive.mode() == PrimitiveMode.TRIANGLES) {
+                a = triangle * 3; b = a + 1; c = a + 2;
+            } else {
+                a = primitive.mode() == PrimitiveMode.TRIANGLE_FAN ? 0 : triangle;
+                b = triangle + 1; c = triangle + 2;
+                if (primitive.mode() == PrimitiveMode.TRIANGLE_STRIP && (triangle & 1) != 0) {
+                    int swap = a; a = b; b = swap;
                 }
             }
-            case TRIANGLE_FAN -> {
-                for (int i = 2; i < indices.length; i++) {
-                    triangles.add(indices[0]);
-                    triangles.add(indices[i - 1]);
-                    triangles.add(indices[i]);
-                }
-            }
-            default -> {
-                return new float[0];
-            }
-        }
-        float[] expanded = new float[triangles.size() * 3];
-        for (int i = 0; i < triangles.size(); i++) {
-            int source = triangles.get(i) * 3;
-            System.arraycopy(positions, source, expanded, i * 3, 3);
+            System.arraycopy(positions, (indices == null ? a : indices[a]) * 3, expanded, triangle * 9, 3);
+            System.arraycopy(positions, (indices == null ? b : indices[b]) * 3, expanded, triangle * 9 + 3, 3);
+            System.arraycopy(positions, (indices == null ? c : indices[c]) * 3, expanded, triangle * 9 + 6, 3);
         }
         return expanded;
     }

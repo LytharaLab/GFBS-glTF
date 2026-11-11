@@ -19,4 +19,9 @@ public final class GltfLoader {
                                  long maxResourceBytes) throws IOException {
         return new JgltfAssetLoader(maxResourceBytes).load(location, resolver::open);
     }
+
+    public static GltfAsset load(ResourceLocation location, GltfResolver resolver,
+                                 GltfLoadLimits limits) throws IOException {
+        return new JgltfAssetLoader(limits).load(location, resolver::open);
+    }
 }

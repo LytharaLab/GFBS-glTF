@@ -15,7 +15,9 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 - [Releases](https://github.com/LytharaLab/GFBS-glTF/releases)
 - [Issue tracker](https://github.com/LytharaLab/GFBS-glTF/issues)
 - [Pull requests](https://github.com/LytharaLab/GFBS-glTF/pulls)
-- [1.5 API guide](docs/1.x-API.md)
+- [1.6 API guide](docs/1.x-API.md)
+- [1.6 migration and LabPBR guide](docs/MIGRATING-1.6.md)
+- [Performance architecture and measurements](docs/PERFORMANCE.md)
 - [Plugin development guide](docs/PLUGINS.md)
 - [1.5 migration guide](docs/MIGRATING-1.5.md)
 - [1.5.1 migration guide](docs/MIGRATING-1.5.1.md)
@@ -24,8 +26,8 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.5.1` |
-| Public API | `1.5.1` |
+| GFBS: glTF | `1.6.0` |
+| Public API | `1.6.0` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -38,6 +40,7 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - glTF 2.0, GLB, and OBJ/MTL loading through Minecraft's resource system.
 - Asynchronous client-side loading with request deduplication, caching, invalidation, and resource-pack reload support.
 - External files, data URIs, sparse accessors, multiple scenes, indexed geometry, and all seven glTF primitive modes.
+- Rigid `EXT_mesh_gpu_instancing` imports with shared meshes and independently controllable instance nodes.
 - Immutable runtime assets with validated node, mesh, material, skin, animation, texture, and scene references.
 - Complete per-instance node graph with indexed/name/path lookup, duplicate-name handling, subtree
   operations, self/subtree visibility, TRS/matrix/post-transform overrides, morph weights, render,
@@ -55,6 +58,8 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
 - Animation playback, seeking, pausing, transitions, layers, masks, additive blending, fades, and user-defined events.
 - Latency-tolerant server-authoritative animation synchronization for entities, block entities, and custom targets, driven by a tick-free monotonic seconds timeline: RTT clock probes, exact `double` timeline math, a frame-driven heartbeat with fixed logical steps, smooth speed correction, and sequence ordering.
 - Primitive frustum culling, maximum render distance, optional occlusion queries, and per-part filtering.
+- Shared scene BVH, spatial sections for large rigid triangle meshes, incremental node transforms,
+  asynchronous preparation, and lazy texture residency with cold-resource eviction.
 - Per-instance, per-node, and per-part RenderType selection with a validated custom RenderType builder.
 - Native triangle submission for glTF triangle, strip, and fan primitives—no degenerate quad padding.
 - Forge static block/item model loading through `gfbs_gltf:gltf`.
@@ -83,28 +88,21 @@ and use the existing skin, morph, visibility, culling, lighting, and resident-ge
 See [Plugin development](docs/PLUGINS.md) for registration, dependencies, lifecycle rules, custom
 extension points, and a non-invasive glow-pass example.
 
-## Renderer performance in 1.4.0
+## Scene rendering in 1.6.0
 
-GFBS: glTF 1.4 replaces the old per-frame streamed path for ordinary rigid animated meshes with
-a resident-GPU path. Triangle geometry without active skinning or morph deformation is compiled
-once into a shared `VertexBuffer` owned by the immutable asset and reused by every `GltfInstance`.
-Node animation changes only the draw matrix; packed light, overlay, tint, alpha, and emissive
-strength remain per draw and do not duplicate the resident geometry.
+Large scenes use a shared spatial index to select candidate nodes before resolving mutable state.
+Moved and animated subtrees remain candidates even after leaving their authored bounds. Large
+rigid triangle primitives receive spatial sections that share the original vertex arrays.
 
-The 1.4 renderer also removes the former 1-to-16 full-mesh emissive repetition, uses one emissive
-draw, caches world matrices and skin palettes, eliminates defensive array copies from internal hot
-paths, reuses immediate buffers, and performs allocation-free primitive bounds transforms for
-culling. Existing defensive-copy public model getters retain their original ownership semantics.
+Without an active shader pack, larger rigid parts reuse resident GPU geometry shared across mesh
+occurrences and material layouts. Tiny parts in large scenes stream into Minecraft's buffers to
+reduce draw calls. With Iris/Oculus, native triangles pass through the caller's entity buffers so
+the pipeline can supply its entity IDs, tangents, render phases, and shadow shaders.
 
-Version 1.4.1 preserves this resident-GPU path on MobileGlues by supplying packed light and overlay
-through the GLES-compatible four-component integer vertex-attribute entry point. Its values are
-identical to desktop OpenGL's two-component call, including the implicit zero/one trailing
-components; no renderer detection or streamed-geometry fallback is required.
-
-Skinning, active morph targets, translucent materials, and custom RenderTypes retain a compatibility
-streamed path. That fallback is also substantially cheaper than 1.3 because it uses internal
-read-only primitive views and only copies vertex arrays when deformation actually needs writable
-data. See [Performance architecture](docs/PERFORMANCE.md) for fast-path rules and profiling notes.
+The default client loader prepares scene plans and spatial data on its loading worker. Textures
+upload on first use, GPU caches evict cold entries at frame boundaries, and runtime node/primitive
+state is created on demand. See [Performance architecture](docs/PERFORMANCE.md) for budgets,
+measured cases, integration details, and the remaining workload limits.
 
 ## Installation
 
@@ -340,28 +338,32 @@ blockstate or item model. The loader bakes the selected scene's default pose, in
 transforms, default morph weights, and rest-pose skinning. Animation clips are intentionally not
 executed on this path.
 
-Every atlas texture used by the glTF material must be declared in the model JSON. Map textures by
-material index or glTF material name through `material_textures`; `material_0`, material-name,
-`texture`, and `particle` slots are used as fallbacks. The API guide documents every option.
+Embedded glTF materials automatically generate atlas sprites with LabPBR companions. Explicit
+`material_textures`, `material_0`, material-name and `texture` slots override generated materials.
+The API guide documents every option.
 
 See the [GFBS: glTF 1.x API guide](docs/1.x-API.md) for loading, animation, rendering, synchronization, node state, material variants, importers, culling, RenderTypes, collision, and migration details.
 
 ## Rendering policy
 
-GFBS: glTF 1.3 does not ship a separate no-shader PBR pipeline. Normal rendering uses Minecraft's `DefaultVertexFormat.NEW_ENTITY`, native triangle draw mode, and the original entity shaders.
+Rendering uses Minecraft's entity shaders and `DefaultVertexFormat.NEW_ENTITY`. Iris/Oculus can
+extend this format through its normal entity pipeline.
 
 - Without a shader pack, base textures retain Minecraft entity lighting while emissive factors
   and textures are rendered in an independent full-bright additive pass.
-- `MASK` materials honor their declared `alphaCutoff`; `BLEND`, `doubleSided`, texture sampler,
-  `TEXCOORD_0`/`TEXCOORD_1`, and texture-transform state are retained.
-- Unlit materials use full-bright base rendering without changing ordinary lit materials.
+- Base alpha coverage follows the declared material mode. Blended parts are ordered by distance.
+- Unlit materials use Minecraft's unlit entity shader.
 - With an active Oculus or Iris shader pack, the same entity rendering path remains in use,
   LabPBR normal/specular companions are created lazily when supported, and emissive textures
   remain an explicit color pass.
-- During an Oculus/Iris shadow pass, GFBS switches to a depth-writing caster path and bypasses color-pass culling and custom RenderType overrides.
+- Native LabPBR 1.3 maps support normal XY, AO, height, smoothness, dielectric F0, metal IDs,
+  porosity/SSS, and emission. Material extras and Java overrides can provide exact channel values.
+- During an Oculus/Iris shadow pass, GFBS uses a depth-writing caster path. An optional adapter
+  follows the shader pack's own entity-shadow frustum.
 - The active shader pack still controls shadow resolution, distance, filtering, and whether block entities participate in its shadow pass.
 
-This keeps the no-shader path compatible with Minecraft's renderer and avoids bundling a second PBR shader implementation.
+The [1.6 migration guide](docs/MIGRATING-1.6.md) explains UV mapping requirements, glTF-to-LabPBR
+conversion, optional shader-pack channels, and shadow integration.
 
 ## Project structure
 

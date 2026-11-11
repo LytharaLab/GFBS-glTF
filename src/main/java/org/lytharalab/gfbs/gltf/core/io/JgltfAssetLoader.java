@@ -12,6 +12,7 @@ import de.javagl.jgltf.model.io.GltfReferenceResolver;
 import de.javagl.jgltf.model.v2.MaterialModelV2;
 import net.minecraft.resources.ResourceLocation;
 import org.lytharalab.gfbs.gltf.api.animation.*;
+import org.lytharalab.gfbs.gltf.api.io.GltfLoadLimits;
 import org.lytharalab.gfbs.gltf.api.model.*;
 
 import java.io.ByteArrayInputStream;
@@ -26,18 +27,18 @@ import java.util.*;
 /** Converts JglTF's mutable model into GFBS:glTF's immutable runtime format. */
 public final class JgltfAssetLoader {
     public static final long DEFAULT_MAX_RESOURCE_BYTES = 256L * 1024L * 1024L;
-    private static final int MAX_NODES = 100_000;
     private static final int MAX_MESHES = 100_000;
     private static final int MAX_PRIMITIVES = 250_000;
     private static final int MAX_TEXTURES = 16_384;
     private static final int MAX_ANIMATIONS = 16_384;
     private static final int MAX_ANIMATION_CHANNELS = 250_000;
-    private static final long MAX_RUNTIME_ARRAY_BYTES = 256L * 1024L * 1024L;
+    private static final String MESH_INSTANCING = "EXT_mesh_gpu_instancing";
     private static final Set<String> SUPPORTED_REQUIRED_EXTENSIONS = Set.of(
         "KHR_mesh_quantization",
         "KHR_texture_transform",
         "KHR_materials_unlit",
-        "KHR_materials_emissive_strength"
+        "KHR_materials_emissive_strength",
+        MESH_INSTANCING
     );
     private static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final int GLB_MAGIC = 0x46546C67;
@@ -45,21 +46,25 @@ public final class JgltfAssetLoader {
     private static final int GLB_JSON_CHUNK = 0x4E4F534A;
     private static final int MAX_JSON_NESTING = 512;
 
-    private final long maxResourceBytes;
+    private final GltfLoadLimits limits;
 
     public JgltfAssetLoader() {
-        this(DEFAULT_MAX_RESOURCE_BYTES);
+        this(GltfLoadLimits.DEFAULT);
     }
 
     public JgltfAssetLoader(long maxResourceBytes) {
-        if (maxResourceBytes < 1024) throw new IllegalArgumentException("Resource limit is too small");
-        this.maxResourceBytes = maxResourceBytes;
+        this(new GltfLoadLimits(maxResourceBytes, GltfLoadLimits.DEFAULT.decodedArrayBytes(),
+            GltfLoadLimits.DEFAULT.nodes()));
+    }
+
+    public JgltfAssetLoader(GltfLoadLimits limits) {
+        this.limits = Objects.requireNonNull(limits, "limits");
     }
 
     public GltfAsset load(ResourceLocation id, GltfResourceResolver resolver) throws IOException {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(resolver, "resolver");
-        ReadBudget budget = new ReadBudget(maxResourceBytes);
+        ReadBudget budget = new ReadBudget(limits.resourceBytes());
         try (InputStream opened = requireStream(resolver.open(id), id)) {
             byte[] sourceBytes = readAll(opened, budget, id.toString());
             byte[] normalizedBytes = normalizeDataUris(sourceBytes, budget);
@@ -102,7 +107,7 @@ public final class JgltfAssetLoader {
         List<MeshModel> sourceMeshes = source.getMeshModels();
         List<TextureModel> sourceTextures = source.getTextureModels();
         List<AnimationModel> sourceAnimations = source.getAnimationModels();
-        requireCount(id, "nodes", sourceNodes.size(), MAX_NODES);
+        requireCount(id, "nodes", sourceNodes.size(), limits.nodes());
         requireCount(id, "meshes", sourceMeshes.size(), MAX_MESHES);
         requireCount(id, "textures", sourceTextures.size(), MAX_TEXTURES);
         requireCount(id, "animations", sourceAnimations.size(), MAX_ANIMATIONS);
@@ -114,7 +119,7 @@ public final class JgltfAssetLoader {
         if (channelCount > MAX_ANIMATION_CHANNELS) {
             throw new GltfLoadException(id, "Asset contains too many animation channels: " + channelCount);
         }
-        validateRuntimeArrayBudget(id, source);
+        validateRuntimeArrayBudget(id, source, jsonRoot.get("nodes"));
 
         ExtensionsModel extensions = source.getExtensionsModel();
         List<String> used = extensions == null ? List.of() : extensions.getExtensionsUsed();
@@ -142,7 +147,8 @@ public final class JgltfAssetLoader {
         int defaultMaterial = materials.size();
         materials.add(GltfMaterial.defaultMaterial());
         List<GltfMesh> meshes = convertMeshes(sourceMeshes, materialIds, defaultMaterial);
-        List<GltfNode> nodes = convertNodes(sourceNodes, nodeIds, meshIds, skinIds);
+        List<GltfNode> nodes = convertNodes(sourceNodes, nodeIds, meshIds, skinIds, meshes,
+            jsonRoot.get("nodes"), source.getAccessorModels(), limits.nodes());
         List<GltfScene> scenes = convertScenes(source.getSceneModels(), nodeIds, nodes);
         List<GltfSkin> skins = convertSkins(source.getSkinModels(), nodeIds);
         List<AnimationClip> animations = convertAnimations(sourceAnimations, nodeIds);
@@ -224,13 +230,26 @@ public final class JgltfAssetLoader {
                     alphaMode,
                     material.getAlphaCutoff(),
                     material.isDoubleSided(),
-                    child(extensions, "KHR_materials_unlit") != null
+                    child(extensions, "KHR_materials_unlit") != null,
+                    labPbr(child(child(materialNode, "extras"), "gfbsLabPbr"))
                 ));
             } else {
                 result.add(GltfMaterial.defaultMaterial());
             }
         }
         return result;
+    }
+
+    private static GltfLabPbr labPbr(JsonNode source) {
+        if (source == null) return GltfLabPbr.DEFAULT;
+        if (!source.isObject()) throw new IllegalArgumentException("gfbsLabPbr must be an object");
+        return new GltfLabPbr(
+            integer(source, "normalTexture", -1), integer(source, "specularTexture", -1),
+            integer(source, "reflectance", -1), integer(source, "porosityOrSubsurface", -1),
+            integer(source, "height", -1), integer(source, "emission", -1),
+            integer(source, "smoothness", -1), integer(source, "normalX", -1),
+            integer(source, "normalY", -1), integer(source, "ambientOcclusion", -1)
+        );
     }
 
     private static GltfTextureInfo textureInfo(JsonNode source, int texture, int texCoord) {
@@ -357,15 +376,88 @@ public final class JgltfAssetLoader {
     private static List<GltfNode> convertNodes(List<NodeModel> sources,
                                                 IdentityHashMap<NodeModel, Integer> nodeIds,
                                                 IdentityHashMap<MeshModel, Integer> meshIds,
-                                                IdentityHashMap<SkinModel, Integer> skinIds) {
+                                                IdentityHashMap<SkinModel, Integer> skinIds,
+                                                List<GltfMesh> meshes, JsonNode nodeJson,
+                                                List<AccessorModel> accessors, int maxNodes) {
         List<GltfNode> result = new ArrayList<>(sources.size());
-        for (NodeModel node : sources) {
-            result.add(new GltfNode(node.getName(), id(nodeIds, node.getParent()),
-                ids(node.getChildren(), nodeIds), ids(node.getMeshModels(), meshIds),
-                id(skinIds, node.getSkinModel()), node.getMatrix(), node.getTranslation(),
-                node.getRotation(), node.getScale(), node.getWeights()));
+        List<GltfNode> instances = new ArrayList<>();
+        for (int index = 0; index < sources.size(); index++) {
+            NodeModel node = sources.get(index);
+            int parent = id(nodeIds, node.getParent());
+            int[] children = ids(node.getChildren(), nodeIds);
+            int[] nodeMeshes = ids(node.getMeshModels(), meshIds);
+            int skin = id(skinIds, node.getSkinModel());
+            JsonNode extension = child(child(arrayElement(nodeJson, index), "extensions"), MESH_INSTANCING);
+            if (extension != null) {
+                if (skin >= 0 || nodeMeshes.length != 1 || node.getWeights() != null
+                    || meshes.get(nodeMeshes[0]).primitives().stream().anyMatch(p -> !p.morphTargets().isEmpty())) {
+                    throw new IllegalArgumentException(MESH_INSTANCING + " requires a rigid mesh at node " + index);
+                }
+                int start = sources.size() + instances.size();
+                int count = appendInstances(index, nodeMeshes, extension, accessors, maxNodes - start, instances);
+                int first = children.length;
+                children = Arrays.copyOf(children, Math.addExact(first, count));
+                for (int instance = 0; instance < count; instance++) children[first + instance] = start + instance;
+                nodeMeshes = new int[0];
+            }
+            result.add(new GltfNode(node.getName(), parent, children, nodeMeshes, skin,
+                node.getMatrix(), node.getTranslation(), node.getRotation(), node.getScale(), node.getWeights()));
         }
+        result.addAll(instances);
         return result;
+    }
+
+    private static int appendInstances(int parent, int[] meshes, JsonNode extension,
+                                       List<AccessorModel> accessors, int remaining, List<GltfNode> output) {
+        JsonNode attributes = child(extension, "attributes");
+        if (attributes == null || !attributes.isObject() || attributes.isEmpty()) {
+            throw new IllegalArgumentException(MESH_INSTANCING + " requires instance attributes");
+        }
+        int count = -1;
+        float[] translation = null, rotation = null, scale = null;
+        var fields = attributes.fields();
+        while (fields.hasNext()) {
+            String name = fields.next().getKey();
+            int index = integer(attributes, name, -1);
+            if (index < 0 || index >= accessors.size()) {
+                throw new IllegalArgumentException("Invalid instance accessor for " + name);
+            }
+            AccessorModel accessor = accessors.get(index);
+            if (count < 0) count = accessor.getCount();
+            if (count <= 0 || count > remaining || accessor.getCount() != count) {
+                throw new IllegalArgumentException("Instance attributes must have the same positive count within the node budget");
+            }
+            int type = accessor.getComponentType();
+            switch (name) {
+                case "TRANSLATION", "SCALE" -> {
+                    requireElementType(accessor, "instance " + name, ElementType.VEC3);
+                    if (type != 5126) throw new IllegalArgumentException("Instance " + name + " must use floats");
+                    if (name.equals("TRANSLATION")) translation = AccessorReader.floats(accessor);
+                    else scale = AccessorReader.floats(accessor);
+                }
+                case "ROTATION" -> {
+                    requireElementType(accessor, "instance rotation", ElementType.VEC4);
+                    if (type != 5126 && !((type == 5120 || type == 5122) && accessor.isNormalized())) {
+                        throw new IllegalArgumentException("Instance rotation must use floats or normalized signed bytes/shorts");
+                    }
+                    rotation = AccessorReader.floats(accessor);
+                }
+                default -> {
+                    if (!name.startsWith("_")) throw new IllegalArgumentException("Invalid instance attribute " + name);
+                }
+            }
+        }
+        int[] noChildren = new int[0];
+        for (int instance = 0; instance < count; instance++) {
+            output.add(new GltfNode("@instance_" + instance, parent, noChildren, meshes, -1, null,
+                instanceComponents(translation, instance, 3), instanceComponents(rotation, instance, 4),
+                instanceComponents(scale, instance, 3), null));
+        }
+        return count;
+    }
+
+    private static float[] instanceComponents(float[] values, int index, int components) {
+        return values == null ? null : Arrays.copyOfRange(values, index * components, (index + 1) * components);
     }
 
     private static List<GltfScene> convertScenes(List<SceneModel> sources,
@@ -438,7 +530,8 @@ public final class JgltfAssetLoader {
     }
 
 
-    private static void validateRuntimeArrayBudget(ResourceLocation id, GltfModel source) throws GltfLoadException {
+    private void validateRuntimeArrayBudget(ResourceLocation id, GltfModel source,
+                                            JsonNode nodes) throws GltfLoadException {
         long components = 0;
         try {
             for (MeshModel mesh : source.getMeshModels()) {
@@ -465,10 +558,26 @@ public final class JgltfAssetLoader {
                     components = addAccessorComponents(components, channel.getSampler().getOutput());
                 }
             }
+            if (nodes != null && nodes.isArray()) {
+                List<AccessorModel> accessors = source.getAccessorModels();
+                for (JsonNode node : nodes) {
+                    JsonNode instance = child(child(node, "extensions"), MESH_INSTANCING);
+                    JsonNode attributes = child(instance, "attributes");
+                    if (attributes == null) continue;
+                    for (String name : List.of("TRANSLATION", "ROTATION", "SCALE")) {
+                        if (!attributes.has(name)) continue;
+                        int index = integer(attributes, name, -1);
+                        if (index < 0 || index >= accessors.size()) {
+                            throw new IllegalArgumentException("Invalid instance accessor for " + name);
+                        }
+                        components = addAccessorComponents(components, accessors.get(index));
+                    }
+                }
+            }
             long bytes = Math.multiplyExact(components, Integer.BYTES);
-            if (bytes > MAX_RUNTIME_ARRAY_BYTES) {
+            if (bytes > limits.decodedArrayBytes()) {
                 throw new GltfLoadException(id, "Decoded glTF attribute and animation arrays require " + bytes
-                    + " bytes; safety limit is " + MAX_RUNTIME_ARRAY_BYTES);
+                    + " bytes; safety limit is " + limits.decodedArrayBytes());
             }
         } catch (ArithmeticException overflow) {
             throw new GltfLoadException(id, "Decoded glTF array size overflow", overflow);
@@ -477,7 +586,7 @@ public final class JgltfAssetLoader {
 
     private static long addAccessorComponents(long total, AccessorModel accessor) {
         if (accessor == null) return total;
-        int count = accessor.getAccessorData().getTotalNumComponents();
+        long count = Math.multiplyExact((long) accessor.getCount(), accessor.getElementType().getNumComponents());
         if (count < 0) throw new IllegalArgumentException("Accessor reports a negative component count");
         return Math.addExact(total, count);
     }
