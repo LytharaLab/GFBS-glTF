@@ -37,9 +37,11 @@
 ### Verification
 
 - Regression tests cover managed and directly edited poses, shared transforms, instance import,
-  configurable limits, and LabPBR channel/mipmap encoding.
+  configurable limits, LabPBR channel/mipmap encoding, and generated static-atlas sprite variants.
 - Real Forge 1.20.1 runs cover vanilla rendering and Oculus 1.7.0/1.8.0 with Embeddium and Complementary,
   including GPU triangle counts, material readback, resource reload, rotated camera frusta, and shadows.
+  Static block/item models additionally verified generated upright/`flip_v` atlas sprites, companion
+  resources, and Oculus block-atlas normal/specular pixels end to end.
 - See [performance measurements](docs/PERFORMANCE.md) and [migration notes](docs/MIGRATING-1.6.md).
 
 ## 1.5.1

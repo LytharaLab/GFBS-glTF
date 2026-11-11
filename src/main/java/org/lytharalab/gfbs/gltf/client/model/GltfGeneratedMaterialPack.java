@@ -98,16 +98,22 @@ public final class GltfGeneratedMaterialPack implements PackResources {
     public synchronized GltfMaterialBaker.Material materialPages(
         GltfAsset asset, int meshIndex, int primitiveIndex, GltfPbrBakeOptions options
     ) {
+        return materialPages(asset, meshIndex, primitiveIndex, options, false);
+    }
+
+    public synchronized GltfMaterialBaker.Material materialPages(
+        GltfAsset asset, int meshIndex, int primitiveIndex, GltfPbrBakeOptions options, boolean flipV
+    ) {
         if (closed) throw new IllegalStateException("Generated glTF material pack is closed");
-        MaterialKey key = new MaterialKey(asset, meshIndex, primitiveIndex, options);
+        MaterialKey key = new MaterialKey(asset, meshIndex, primitiveIndex, options, flipV);
         GltfMaterialBaker.Material existing = materials.get(key);
         if (existing != null) return existing;
         GltfPrimitive primitive = asset.meshes().get(meshIndex).primitives().get(primitiveIndex);
         GltfMaterialBaker baker = bakers.computeIfAbsent(asset, model -> new GltfMaterialBaker(model.textures()));
         GltfMaterialBaker.Material material = baker.bake(primitive,
-            asset.materials().get(primitive.material()), options, true, true);
+            asset.materials().get(primitive.material()), options, true, true, flipV);
         for (GltfMaterialBaker.Page page : material.pages()) {
-            ResourceLocation sprite = sprite(asset, meshIndex, primitiveIndex, options, page.index);
+            ResourceLocation sprite = sprite(asset, meshIndex, primitiveIndex, options, flipV, page.index);
             for (int kind = 0; kind < 3; kind++) {
                 String suffix = kind == 0 ? "" : kind == 1 ? "_n" : "_s";
                 images.put(ResourceLocation.fromNamespaceAndPath(sprite.getNamespace(),
@@ -119,15 +125,21 @@ public final class GltfGeneratedMaterialPack implements PackResources {
     }
 
     public ResourceLocation sprite(GltfAsset asset, int meshIndex, int primitiveIndex, int pageIndex) {
-        return sprite(asset, meshIndex, primitiveIndex, GltfPbrBakeOptions.DEFAULT, pageIndex);
+        return sprite(asset, meshIndex, primitiveIndex, GltfPbrBakeOptions.DEFAULT, false, pageIndex);
     }
 
     public ResourceLocation sprite(GltfAsset asset, int meshIndex, int primitiveIndex,
                                    GltfPbrBakeOptions options, int pageIndex) {
+        return sprite(asset, meshIndex, primitiveIndex, options, false, pageIndex);
+    }
+
+    public ResourceLocation sprite(GltfAsset asset, int meshIndex, int primitiveIndex,
+                                   GltfPbrBakeOptions options, boolean flipV, int pageIndex) {
         String quality = options.pageSize() + "_" + options.chartSize() + "_" + options.maxPixels();
         return ResourceLocation.fromNamespaceAndPath(GFBSglTF.MODID,
             "generated/" + generation + "/" + asset.id().getNamespace() + "/" + asset.id().getPath()
-                + "/" + meshIndex + "/" + primitiveIndex + "/" + quality + "/" + pageIndex);
+                + "/" + meshIndex + "/" + primitiveIndex + "/" + quality + "/"
+                + (flipV ? "flipped" : "upright") + "/" + pageIndex);
     }
 
     public static GltfPbrBakeOptions bakeOptions(JsonObject model) {
@@ -141,10 +153,18 @@ public final class GltfGeneratedMaterialPack implements PackResources {
             options.has("max_pixels") ? options.get("max_pixels").getAsLong() : defaults.maxPixels());
     }
 
+    /** Mirrors the loader's {@code flip_v} default; a malformed value fails later in the loader. */
+    private static boolean parseFlipV(JsonObject model) {
+        JsonElement element = model.get("flip_v");
+        return element != null && element.isJsonPrimitive()
+            && element.getAsJsonPrimitive().isBoolean() && element.getAsBoolean();
+    }
+
     private synchronized void prepareAtlas() {
         if (atlasDefinition != null || closed) return;
         JsonArray definitions = new JsonArray();
         Set<ResourceLocation> added = new java.util.HashSet<>();
+        int models = 0;
         for (var entry : sources().listResources("models", path -> path.getPath().endsWith(".json")).entrySet()) {
             try (Reader reader = entry.getValue().openAsReader()) {
                 JsonElement parsed = JsonParser.parseReader(reader);
@@ -155,11 +175,13 @@ public final class GltfGeneratedMaterialPack implements PackResources {
                 ResourceLocation location = new ResourceLocation(model.get("model").getAsString());
                 GltfAsset asset = loadAsset(location);
                 GltfPbrBakeOptions options = bakeOptions(model);
+                boolean flipV = parseFlipV(model);
+                models++;
                 for (int mesh = 0; mesh < asset.meshes().size(); mesh++) {
                     for (int primitive = 0; primitive < asset.meshes().get(mesh).primitives().size(); primitive++) {
-                        var material = materialPages(asset, mesh, primitive, options);
+                        var material = materialPages(asset, mesh, primitive, options, flipV);
                         for (GltfMaterialBaker.Page page : material.pages()) {
-                            ResourceLocation sprite = sprite(asset, mesh, primitive, options, page.index);
+                            ResourceLocation sprite = sprite(asset, mesh, primitive, options, flipV, page.index);
                             if (!added.add(sprite)) continue;
                             JsonObject source = new JsonObject();
                             source.addProperty("type", "minecraft:single");
@@ -171,6 +193,10 @@ public final class GltfGeneratedMaterialPack implements PackResources {
             } catch (IOException | RuntimeException failure) {
                 GFBSglTF.LOGGER.error("Could not prepare embedded glTF materials from {}", entry.getKey(), failure);
             }
+        }
+        if (models > 0) {
+            GFBSglTF.LOGGER.info("Prepared {} embedded glTF material sprite(s) from {} static model(s)",
+                definitions.size(), models);
         }
         JsonObject atlas = new JsonObject();
         atlas.add("sources", definitions);
@@ -230,5 +256,6 @@ public final class GltfGeneratedMaterialPack implements PackResources {
         atlasDefinition = null;
     }
 
-    private record MaterialKey(GltfAsset asset, int mesh, int primitive, GltfPbrBakeOptions options) {}
+    private record MaterialKey(GltfAsset asset, int mesh, int primitive,
+                               GltfPbrBakeOptions options, boolean flipV) {}
 }
