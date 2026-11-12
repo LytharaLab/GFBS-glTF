@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.6.1
+
+### Fixed
+
+- Static block/item material baking now samples independent glTF emissive textures and writes a
+  per-texel LabPBR emission mask instead of using the no-emission sentinel for every material whose
+  base-color and emissive maps differ. Iris/Oculus custom emission, including Rethinking Voxels,
+  now receives the actual emissive silhouette.
+- Generated dynamic LabPBR specular companions use the same independent emissive sampling when
+  `labPbrEmission(true)` is requested. The compatibility bridge must be available before the
+  separate emissive pass is suppressed, preventing emission loss during bridge fallback.
+- Static atlas baking canonicalizes UVs that cover one complete repeated texture tile. Models such
+  as a mesh whose UVs span `[1,2]` no longer generate a chart for every triangle; the same texture
+  pixels are addressed through an adjusted transform instead. Repeated ranges crossing cell
+  boundaries and non-`REPEAT` samplers continue to use triangle charts.
+
+### Verification
+
+- Added regression coverage for independent emissive-to-specular-alpha baking, bounded LabPBR
+  emission encoding, repeat-domain UV canonicalization, and chart fallback for crossing or clamped
+  UV ranges. The expanded unit suite remains green.
+
 ## 1.6.0
 
 ### Rendering and materials

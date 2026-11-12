@@ -1,6 +1,6 @@
-# Migrating to 1.6.0
+# Migrating to 1.6.1
 
-GFBS glTF 1.6.0 targets Minecraft Forge 1.20.1 and Java 17. Existing constructors, animation
+GFBS glTF 1.6.1 targets Minecraft Forge 1.20.1 and Java 17. Existing constructors, animation
 timelines, node selectors, material overrides, and plugin entry points remain available.
 The animation network protocol remains version 3.
 
@@ -137,6 +137,17 @@ slots retain priority. Static `pbr_bake` accepts `page_size`, `chart_size`, and 
 `flip_v` selects the V orientation baked into the generated sprites; upright and flipped variants
 use separate atlas entries.
 
+Static `_s` generation samples independent emissive textures per texel. The emission channel keeps
+255 as the no-emission sentinel and uses 1..254 for visible emission after applying the material's
+emissive factor, emissive strength and texture transform. This allows shader-pack custom emission
+without requiring an entity/block-entity renderer. A baked model still cannot provide the API's
+separate additive pass when no shader pack is active.
+
+UV ranges that cover one complete repeated tile are shifted by an integral offset before chart
+selection. This preserves the exact wrap sample while avoiding one chart per triangle for exporters
+that emit V coordinates such as `[1,2]`. Ranges crossing a repeat cell and non-repeat samplers still
+use charts.
+
 | Texture | R | G | B | A |
 | --- | --- | --- | --- | --- |
 | Normal | Tangent normal X | Tangent normal Y in DirectX convention | Material AO | Height |
@@ -163,15 +174,16 @@ The Iris bridge generates LabPBR companions when native packed maps are absent.
   Intermediate metalness receives an approximation at the dielectric/metal boundary.
 - Normal XYZ is scaled and normalized, then converted to the LabPBR XY convention. AO occupies
   normal B. Default height is 255.
-- Explicit LabPBR emission occupies specular A. Standard glTF emissive colors retain their separate
-  emissive pass, which supports independent emissive color and texture coordinates.
+- Explicit LabPBR emission occupies specular A. By default, standard glTF emissive colors retain
+  their separate emissive pass, which preserves independent color and texture coordinates.
 
 Independent UV sets, transforms and repeating domains are resampled into shared triangle charts,
 preserving the normal UV orientation. Runtime `pbrBakeOptions(GltfPbrBakeOptions)` controls page,
 chart and pixel budgets; finite chart resolution imposes a texture-quality limit. Native maps
 authored in a shared domain avoid that resampling. PBR, UNLIT and NEON all retain companions.
-`labPbrEmission(true)` moves representable glTF emission into specular A; independent hue or HDR
-emission retains its separate pass. Shader packs still determine which effects are implemented.
+`labPbrEmission(true)` samples any visible glTF emissive factor/texture into specular A. Shader packs
+reconstruct the emitted color from the base texture, so leave the option disabled when independent
+hue or HDR emission must be preserved. Shader packs still determine which effects are implemented.
 glTF roughness is already perceptual. [glTF material model](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#appendix-b-brdf-implementation).
 
 ## Shadows and render hooks

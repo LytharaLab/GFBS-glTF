@@ -139,30 +139,48 @@ final class GltfGpuTextures {
             }
             GltfTextureInfo primary = specular ? material.metallicRoughnessTextureInfo() : material.normalTextureInfo();
             GltfTextureInfo ao = specular ? GltfTextureInfo.absent() : material.occlusionTextureInfo();
+            GltfTextureInfo emissive = specular && lab.emission() < 0
+                && GltfGeometryPipeline.hasVisibleEmission(material)
+                ? material.emissiveTextureInfo() : GltfTextureInfo.absent();
             UvProjection primaryUv = projection(anchor, primary);
             UvProjection aoUv = projection(anchor, ao);
+            UvProjection emissiveUv = projection(anchor, emissive);
+            boolean sampleEmission = emissive.present() && emissiveUv != null;
             try (NativeImage source = primaryUv == null ? null : decode(primary.texture());
-                 NativeImage occlusion = aoUv == null ? null : decode(ao.texture())) {
-                int width = Math.max(source == null ? 1 : source.getWidth(), occlusion == null ? 1 : occlusion.getWidth());
-                int height = Math.max(source == null ? 1 : source.getHeight(), occlusion == null ? 1 : occlusion.getHeight());
+                 NativeImage occlusion = aoUv == null ? null : decode(ao.texture());
+                 NativeImage emission = sampleEmission ? decode(emissive.texture()) : null) {
+                int width = Math.max(source == null ? 1 : source.getWidth(),
+                    Math.max(occlusion == null ? 1 : occlusion.getWidth(),
+                        emission == null ? 1 : emission.getWidth()));
+                int height = Math.max(source == null ? 1 : source.getHeight(),
+                    Math.max(occlusion == null ? 1 : occlusion.getHeight(),
+                        emission == null ? 1 : emission.getHeight()));
                 // Two very differently shaped inputs can imply an unreasonable cross-product.
                 if ((long) width * height > 16L * 1024 * 1024) {
-                    NativeImage reference = source == null ? occlusion : source;
+                    NativeImage reference = source != null ? source
+                        : occlusion != null ? occlusion : emission;
                     width = reference.getWidth();
                     height = reference.getHeight();
                 }
                 try (NativeImage output = new NativeImage(width, height, false)) {
-                    int alpha = specular ? byteOr(lab.emission(), 255) : byteOr(lab.height(), 255);
                     GltfTexture sourceSampler = sampler(primary.texture());
                     GltfTexture aoSampler = sampler(ao.texture());
+                    GltfTexture emissiveSampler = sampler(emissive.texture());
                     for (int y = 0; y < height; y++) {
                         double v = (y + 0.5) / height;
                         for (int x = 0; x < width; x++) {
                             double u = (x + 0.5) / width;
                             int pixel = source == null ? 0xffffffff : primaryUv.sample(source, sourceSampler, u, v);
                             if (specular) {
+                                int alpha = lab.emission() >= 0 ? lab.emission()
+                                    : !GltfGeometryPipeline.hasVisibleEmission(material) ? 255
+                                    : emission != null
+                                        ? LabPbrEncoder.emission(
+                                            emissiveUv.sample(emission, emissiveSampler, u, v), material)
+                                        : emissive.present() ? 255 : LabPbrEncoder.emission(material);
                                 output.setPixelRGBA(x, y, LabPbrEncoder.specular(pixel, material, alpha));
                             } else {
+                                int alpha = byteOr(lab.height(), 255);
                                 int ambient = occlusion == null ? 255 : channel(1.0f
                                     - (1.0f - red(aoUv.sample(occlusion, aoSampler, u, v)) / 255.0f)
                                         * material.occlusionStrength());
@@ -171,7 +189,8 @@ final class GltfGpuTextures {
                             }
                         }
                     }
-                    GltfTexture outputSampler = source == null && occlusion == null ? null : sampler(anchor.texture());
+                    GltfTexture outputSampler = source == null && occlusion == null && emission == null
+                        ? null : sampler(anchor.texture());
                     applyLabOverrides(output, lab, specular);
                     return new GltfUploadedTexture(output, outputSampler, specular);
                 }

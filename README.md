@@ -26,8 +26,8 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.6.0` |
-| Public API | `1.6.0` |
+| GFBS: glTF | `1.6.1` |
+| Public API | `1.6.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -62,7 +62,8 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
   asynchronous preparation, and lazy texture residency with cold-resource eviction.
 - Per-instance, per-node, and per-part RenderType selection with a validated custom RenderType builder.
 - Native triangle submission for glTF triangle, strip, and fan primitives—no degenerate quad padding.
-- Forge static block/item model loading through `gfbs_gltf:gltf`.
+- Forge static block/item model loading through `gfbs_gltf:gltf`, including independent emissive
+  masks and one-tile repeat-domain UV canonicalization without a block entity.
 - Oculus/Iris shadow-map rendering with a dedicated depth-writing caster path.
 - Optional bounds, cached voxel, and current-pose precise collision.
 - Extensible model importer registry for third-party formats.
@@ -88,7 +89,7 @@ and use the existing skin, morph, visibility, culling, lighting, and resident-ge
 See [Plugin development](docs/PLUGINS.md) for registration, dependencies, lifecycle rules, custom
 extension points, and a non-invasive glow-pass example.
 
-## Scene rendering in 1.6.0
+## Scene rendering in 1.6.1
 
 Large scenes use a shared spatial index to select candidate nodes before resolving mutable state.
 Moved and animated subtrees remain candidates even after leaving their authored bounds. Large
@@ -341,8 +342,11 @@ executed on this path.
 Embedded glTF materials automatically generate atlas sprites with LabPBR companions. Explicit
 `material_textures`, `material_0`, material-name and `texture` slots override generated materials.
 Set `flip_v` when the exporter's V axis needs mirroring; the generated base, `_n`, and `_s` sprites
-follow that orientation and upright/flipped variants remain distinct. The API guide documents every
-option.
+follow that orientation and upright/flipped variants remain distinct. Independent emissive maps are
+sampled per texel into the generated `_s` emission channel, so shader-pack emission does not require
+the emissive texture to equal the base-color texture. UVs covering one complete repeated texture
+tile are canonicalized into the atlas domain; ranges that genuinely cross tile boundaries remain
+triangle-charted. The API guide documents every option.
 
 See the [GFBS: glTF 1.x API guide](docs/1.x-API.md) for loading, animation, rendering, synchronization, node state, material variants, importers, culling, RenderTypes, collision, and migration details.
 
@@ -358,6 +362,8 @@ extend this format through its normal entity pipeline.
 - With an active Oculus or Iris shader pack, the same entity rendering path remains in use,
   LabPBR normal/specular companions are created lazily when supported, and emissive textures
   remain an explicit color pass.
+- Static baked materials encode independent emissive textures into LabPBR specular alpha for
+  shader-pack emission and bloom. They retain chunk batching and do not require a block entity.
 - Native LabPBR 1.3 maps support normal XY, AO, height, smoothness, dielectric F0, metal IDs,
   porosity/SSS, and emission. Material extras and Java overrides can provide exact channel values.
 - During an Oculus/Iris shadow pass, GFBS uses a depth-writing caster path. An optional adapter

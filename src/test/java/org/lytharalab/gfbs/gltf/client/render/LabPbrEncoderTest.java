@@ -27,6 +27,20 @@ class LabPbrEncoderTest {
     }
 
     @Test
+    void convertsIndependentEmissiveSamplesToDiscreteEmissionMasks() {
+        GltfMaterial material = GltfMaterialOverride.builder()
+            .emissive(1.0f, 1.0f, 1.0f)
+            .emissiveStrength(1.0f)
+            .build()
+            .resolve(GltfMaterial.defaultMaterial());
+        assertEquals(255, emission(rgba(0, 0, 0, 255), material));
+        assertEquals(127, emission(rgba(0, 128, 0, 255), material));
+        assertEquals(254, emission(rgba(255, 255, 255, 255), material));
+        assertEquals(255, emission(0.0f));
+        assertEquals(1, emission(0.0001f));
+    }
+
+    @Test
     void sparseChannelOverridesRetainPackedMapsAndReplacementResetsThem() {
         GltfLabPbr source = new GltfLabPbr(0, 1, 235, 22, 64, 99, 182, 144, 101, 210);
         GltfLabPbr patch = new GltfLabPbr(-1, -1, -1, 33, -1, 88, -1, -1, 177, -1);

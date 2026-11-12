@@ -276,7 +276,7 @@ public final class EntityGltfRenderer {
 
                 GltfMaterial material = primitiveState.effectiveMaterial();
                 if (emissivePass && !GltfGeometryPipeline.hasVisibleEmission(material)) continue;
-                if (emissivePass && shaderPack
+                if (emissivePass && shaderPack && OculusPbrTextureBridge.install()
                     && GltfMaterialBaker.emissionInSpecular(material, options.labPbrEmission())) continue;
                 GltfRenderPart part = null;
                 if (options.hasPartFilterOverride()) {

@@ -33,6 +33,29 @@ final class LabPbrEncoder {
             Math.max(0, material.labPbr().porosityOrSubsurface()), emission);
     }
 
+    /**
+     * Converts one emissive-texture sample to the LabPBR emission channel. Zero emission uses the
+     * 255 sentinel; representable emission is kept in 1..254 so mip downsampling remains discrete.
+     */
+    static int emission(int emissive, GltfMaterial material) {
+        float strength = material.emissiveStrength();
+        if (!(strength > 0.0f)) return 255;
+        float red = red(emissive) / 255.0f * material.emissiveRed() * strength;
+        float green = green(emissive) / 255.0f * material.emissiveGreen() * strength;
+        float blue = blue(emissive) / 255.0f * material.emissiveBlue() * strength;
+        return emission(Math.max(red, Math.max(green, blue)));
+    }
+
+    static int emission(GltfMaterial material) {
+        return emission(Math.max(material.emissiveRed(),
+            Math.max(material.emissiveGreen(), material.emissiveBlue())) * material.emissiveStrength());
+    }
+
+    static int emission(float amount) {
+        if (!(amount > 0.0f) || !Float.isFinite(amount)) return 255;
+        return Math.min(254, Math.max(1, Math.round(amount * 254.0f)));
+    }
+
     static int mipSpecular(int a, int b, int c, int d) {
         return rgba((red(a) + red(b) + red(c) + red(d) + 2) / 4,
             categorical(green(a), green(b), green(c), green(d), 230, true),

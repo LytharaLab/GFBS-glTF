@@ -57,7 +57,7 @@ final class GltfGpuModel {
             for (PrimitivePlan part : node.primitives) {
                 prepared.sections(part.primitive);
                 GltfMaterial material = asset.materials().get(part.primitive.material());
-                if (prepared.materials.requiresCharts(part.primitive, material, false)) {
+                if (prepared.materials.requiresCharts(part.primitive, material, false, false)) {
                     prepared.materials.bake(part.primitive, material, GltfPbrBakeOptions.DEFAULT, false, false);
                 }
             }
@@ -156,7 +156,8 @@ final class GltfGpuModel {
     List<GltfMaterialBaker.Page> materialPages(GltfPrimitive primitive, GltfMaterial material,
                                                boolean shaderPack, GltfRenderOptions options) {
         if (!shaderPack || !OculusPbrTextureBridge.install()) return ORIGINAL_UV;
-        if (!options.labPbrEmission() && !prepared.materials.requiresCharts(primitive, material, false)) return ORIGINAL_UV;
+        if (!options.labPbrEmission()
+            && !prepared.materials.requiresCharts(primitive, material, false, false)) return ORIGINAL_UV;
         return prepared.materials.bake(primitive, material, options.pbrBakeOptions(), false, options.labPbrEmission()).pages();
     }
 

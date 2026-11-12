@@ -1,4 +1,4 @@
-# Performance in 1.6.0
+# Performance in 1.6.1
 
 The renderer selects scene work before creating per-instance state or uploading images.
 This addresses both large collections of mesh occurrences and oversized individual rigid meshes.
@@ -94,6 +94,8 @@ Reimagined r5.6.1 and Oculus 1.7.0/Embeddium 0.3.28/Complementary Reimagined r5.
 - A non-square 4×2 packed specular image, categorical last mip, and sampler state across reload.
 - Generated static block/item atlas sprites, upright and `flip_v` variants, companion channel
   pixels, and Oculus block-atlas normal/specular pixels.
+- Independent emissive-to-specular-alpha conversion, repeat-tile UV canonicalization, and chart
+  fallback when wrapping cannot be represented by one atlas domain.
 - A resolved Oculus entity-shadow frustum adapter with its opt-in enabled.
 - Generated glTF companion pixels, including metal ID 255.
 - View-space camera-frustum selection after camera rotation.
@@ -102,7 +104,12 @@ Reimagined r5.6.1 and Oculus 1.7.0/Embeddium 0.3.28/Complementary Reimagined r5.
 - Regression tests for matrix ownership, writable legacy poses, configurable import limits, and
   LabPBR channel/mipmap categories.
 
-Normal project verification uses `./gradlew build`. The 1.6.0 release JAR was also exercised in
+The 1.6.1 static-material acceptance pass used Forge 47.4.21, Oculus 1.8.0, Embeddium 0.3.31 and
+Rethinking Voxels r0.1-beta9. The runtime selected `gfbs_gltf 1.6.1`, reduced the test resource set
+from 14 generated material sprites to one through repeat-domain canonicalization, removed the
+non-power-of-two mip-level warning, and showed the independent emissive details and bloom in-world.
+
+Normal project verification uses `./gradlew build`. The 1.6.0 baseline JAR was also exercised in
 controlled Forge client runs; re-run equivalent client acceptance after changing atlas, material,
 or scene-preparation code.
 

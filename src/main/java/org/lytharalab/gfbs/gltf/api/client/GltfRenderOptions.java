@@ -41,7 +41,10 @@ public final class GltfRenderOptions {
     public boolean labPbrEmission() { return labPbrEmission; }
     public GltfPbrBakeOptions pbrBakeOptions() { return pbrBakeOptions; }
 
-    /** Uses LabPBR emission for representable glTF emission and explicitly authored packed maps. */
+    /**
+     * Uses LabPBR specular alpha for glTF emission and explicitly authored packed maps. With a
+     * compatible shader pack this replaces the separate additive emissive pass for the instance.
+     */
     public GltfRenderOptions labPbrEmission(boolean enabled) {
         labPbrEmission = enabled;
         return this;

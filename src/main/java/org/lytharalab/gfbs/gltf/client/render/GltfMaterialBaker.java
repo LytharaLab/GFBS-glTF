@@ -19,6 +19,8 @@ import static org.lytharalab.gfbs.gltf.client.render.LabPbrEncoder.*;
  */
 public final class GltfMaterialBaker {
     private static final long CACHE_BYTES = 128L * 1024 * 1024;
+    private static final float UV_EPSILON = 1.0e-5f;
+    private static final int REPEAT = 10497;
     private final List<GltfTexture> textures;
     private final Map<Key, Material> cache = new LinkedHashMap<>(16, 0.75f, true);
     private long cachedBytes;
@@ -38,7 +40,7 @@ public final class GltfMaterialBaker {
         if (existing != null) return existing;
         try (GltfImageSampler.Sources sources = new GltfImageSampler.Sources(textures, flipV)) {
             Pixels pixels = new Pixels(sources, material, labEmission);
-            List<Page> pages = requiresCharts(primitive, material, staticAtlas)
+            List<Page> pages = requiresCharts(primitive, material, staticAtlas, labEmission)
                 ? chartPages(primitive, material, options, pixels)
                 : List.of(singlePage(primitive, material, options, pixels));
             Material result = new Material(pages, pixels.emissionInSpecular);
@@ -58,11 +60,17 @@ public final class GltfMaterialBaker {
         }
     }
 
-    public boolean requiresCharts(GltfPrimitive primitive, GltfMaterial material, boolean staticAtlas) {
+    public boolean requiresCharts(GltfPrimitive primitive, GltfMaterial material,
+                                  boolean staticAtlas, boolean includeEmission) {
         if (!GltfGeometryPipeline.isTriangleMode(primitive.mode())) return false;
         GltfTextureInfo anchor = anchor(material);
-        for (GltfTextureInfo info : List.of(material.baseColorTextureInfo(), material.normalTextureInfo(),
-            material.occlusionTextureInfo(), material.metallicRoughnessTextureInfo())) {
+        List<GltfTextureInfo> infos = includeEmission
+            ? List.of(material.baseColorTextureInfo(), material.normalTextureInfo(),
+                material.occlusionTextureInfo(), material.metallicRoughnessTextureInfo(),
+                material.emissiveTextureInfo())
+            : List.of(material.baseColorTextureInfo(), material.normalTextureInfo(),
+                material.occlusionTextureInfo(), material.metallicRoughnessTextureInfo());
+        for (GltfTextureInfo info : infos) {
             if (!info.present()) continue;
             if (!sameUv(anchor, info)) return true;
             GltfTexture a = texture(anchor.texture()), b = texture(info.texture());
@@ -75,9 +83,13 @@ public final class GltfMaterialBaker {
                 : GltfPrimitiveAccess.texCoords1(primitive);
             if (uv != null) {
                 float[] point = new float[2];
+                GltfTexture anchorTexture = texture(anchor.texture());
+                GltfTextureInfo canonical = anchorTexture == null ? anchor
+                    : canonicalTextureInfo(uv, anchor, anchorTexture.wrapS(), anchorTexture.wrapT());
                 for (int i = 0; i < uv.length; i += 2) {
-                    anchor.transform(uv[i], uv[i + 1], point);
-                    if (point[0] < 0 || point[0] > 1 || point[1] < 0 || point[1] > 1) return true;
+                    canonical.transform(uv[i], uv[i + 1], point);
+                    if (point[0] < -UV_EPSILON || point[0] > 1.0f + UV_EPSILON
+                        || point[1] < -UV_EPSILON || point[1] > 1.0f + UV_EPSILON) return true;
                 }
             }
         }
@@ -85,23 +97,9 @@ public final class GltfMaterialBaker {
     }
 
     public static boolean emissionInSpecular(GltfMaterial material, boolean enabled) {
-        return enabled && (material.labPbr().specularTexture() >= 0 || material.labPbr().emission() >= 0
-            || emissionRatio(material) >= 0);
-    }
-
-    private static float emissionRatio(GltfMaterial material) {
-        if (!GltfGeometryPipeline.hasVisibleEmission(material)) return -1;
-        if (!material.baseColorTextureInfo().equals(material.emissiveTextureInfo())) return -1;
-        float r = material.emissiveRed() * material.emissiveStrength();
-        float g = material.emissiveGreen() * material.emissiveStrength();
-        float b = material.emissiveBlue() * material.emissiveStrength();
-        float base = Math.max(material.baseColorRed(), Math.max(material.baseColorGreen(), material.baseColorBlue()));
-        if (base <= 0) return -1;
-        float ratio = Math.max(r, Math.max(g, b)) / base;
-        if (ratio > 1 || Math.abs(r - ratio * material.baseColorRed()) > 0.0001f
-            || Math.abs(g - ratio * material.baseColorGreen()) > 0.0001f
-            || Math.abs(b - ratio * material.baseColorBlue()) > 0.0001f) return -1;
-        return ratio;
+        return enabled && (material.labPbr().specularTexture() >= 0
+            || material.labPbr().emission() >= 0
+            || GltfGeometryPipeline.hasVisibleEmission(material));
     }
 
     public static GltfTextureInfo anchor(GltfMaterial material) {
@@ -118,11 +116,53 @@ public final class GltfMaterialBaker {
             && a.scaleU() == b.scaleU() && a.scaleV() == b.scaleV() && a.rotation() == b.rotation();
     }
 
+    /**
+     * Removes an integral repeat offset when the complete primitive occupies one texture tile.
+     * Block atlases cannot represent sampler wrapping, so canonicalizing such UVs avoids turning
+     * every triangle into a chart while preserving the sampled image.
+     */
+    static GltfTextureInfo canonicalTextureInfo(float[] uv, GltfTextureInfo info,
+                                                int wrapS, int wrapT) {
+        if (uv == null || uv.length < 2) return info;
+        float minU = Float.POSITIVE_INFINITY, minV = Float.POSITIVE_INFINITY;
+        float maxU = Float.NEGATIVE_INFINITY, maxV = Float.NEGATIVE_INFINITY;
+        float[] point = new float[2];
+        for (int i = 0; i < uv.length; i += 2) {
+            info.transform(uv[i], uv[i + 1], point);
+            minU = Math.min(minU, point[0]);
+            minV = Math.min(minV, point[1]);
+            maxU = Math.max(maxU, point[0]);
+            maxV = Math.max(maxV, point[1]);
+        }
+        int shiftU = canonicalShift(minU, maxU, wrapS);
+        int shiftV = canonicalShift(minV, maxV, wrapT);
+        if (shiftU == 0 && shiftV == 0) return info;
+        return new GltfTextureInfo(info.texture(), info.texCoord(),
+            info.offsetU() + shiftU, info.offsetV() + shiftV,
+            info.scaleU(), info.scaleV(), info.rotation());
+    }
+
+    private static int canonicalShift(float minimum, float maximum, int wrap) {
+        if (minimum >= -UV_EPSILON && maximum <= 1.0f + UV_EPSILON) return 0;
+        if (wrap != REPEAT) return 0;
+        double floor = Math.floor(minimum + UV_EPSILON);
+        if (floor <= Integer.MIN_VALUE || floor > Integer.MAX_VALUE) return 0;
+        int cell = (int) floor;
+        if (minimum < cell - UV_EPSILON || maximum > cell + 1.0f + UV_EPSILON) return 0;
+        return -cell;
+    }
+
     private GltfTexture texture(int index) { return index < 0 ? null : textures.get(index); }
 
-    private static Page singlePage(GltfPrimitive primitive, GltfMaterial material,
-                                   GltfPbrBakeOptions options, Pixels pixels) throws IOException {
+    private Page singlePage(GltfPrimitive primitive, GltfMaterial material,
+                            GltfPbrBakeOptions options, Pixels pixels) throws IOException {
         GltfTextureInfo anchor = anchor(material);
+        GltfTexture anchorTexture = texture(anchor.texture());
+        if (anchorTexture != null) {
+            float[] uv = anchor.texCoord() == 0 ? GltfPrimitiveAccess.texCoords0(primitive)
+                : GltfPrimitiveAccess.texCoords1(primitive);
+            anchor = canonicalTextureInfo(uv, anchor, anchorTexture.wrapS(), anchorTexture.wrapT());
+        }
         int width = pixels.width(), height = pixels.height();
         if ((long) width * height > options.maxPixels()) {
             double scale = Math.sqrt((double) options.maxPixels() / ((long) width * height));
@@ -382,10 +422,10 @@ public final class GltfMaterialBaker {
     private static final class Pixels {
         final GltfMaterial material;
         final GltfLabPbr lab;
-        final GltfImageSampler base, normal, specular, metallic, occlusion;
+        final GltfImageSampler base, normal, specular, metallic, occlusion, emissive;
         final List<GltfImageSampler> samplers = new ArrayList<>();
         final boolean emissionInSpecular;
-        final int automaticEmission;
+        final boolean emissionEnabled;
 
         Pixels(GltfImageSampler.Sources sources, GltfMaterial material, boolean emission) throws IOException {
             this.material = material; lab = material.labPbr();
@@ -396,8 +436,9 @@ public final class GltfMaterialBaker {
             metallic = add(sources.get(material.metallicRoughnessTextureInfo()));
             occlusion = add(sources.get(material.occlusionTextureInfo()));
             emissionInSpecular = emissionInSpecular(material, emission);
-            float ratio = emission ? emissionRatio(material) : -1;
-            automaticEmission = ratio < 0 ? 255 : Math.round(ratio * 254);
+            emissionEnabled = emission;
+            emissive = emissionEnabled && GltfGeometryPipeline.hasVisibleEmission(material)
+                ? add(sources.get(material.emissiveTextureInfo())) : null;
         }
 
         private static GltfTextureInfo nativeInfo(GltfTextureInfo uv, int texture) {
@@ -448,11 +489,20 @@ public final class GltfMaterialBaker {
                 inherit(lab.ambientOcclusion(), blue(normalPixel)), inherit(lab.height(), normalPixel >>> 24));
             int specularPixel = specular == null
                 ? LabPbrEncoder.specular(metallic == null ? -1 : metallic.sample(u0, v0, u1, v1, false),
-                    material, automaticEmission)
+                    material, emission(u0, v0, u1, v1))
                 : specular.sample(u0, v0, u1, v1, true);
             out[2] = rgba(inherit(lab.smoothness(), red(specularPixel)), inherit(lab.reflectance(), green(specularPixel)),
                 inherit(lab.porosityOrSubsurface(), blue(specularPixel)), inherit(lab.emission(), specularPixel >>> 24));
         }
+
+        private int emission(double u0, double v0, double u1, double v1) {
+            if (!emissionEnabled || !GltfGeometryPipeline.hasVisibleEmission(material)) return 255;
+            if (emissive != null) {
+                return LabPbrEncoder.emission(emissive.sample(u0, v0, u1, v1, false), material);
+            }
+            return LabPbrEncoder.emission(material);
+        }
+
         private static int inherit(int value, int original) { return value < 0 ? original : value; }
     }
 }
