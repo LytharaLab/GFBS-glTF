@@ -310,6 +310,9 @@ state or renderer code, because the synchronized target owns that base layer.
 
 ## Static Forge block and item models
 
+> [!WARNING]
+> The static model loader in GFBS: glTF 1.6.1 and earlier has several issues and limitations. For the best rendering quality, I recommend using the GFBS: glTF API.
+
 Use the `gfbs_gltf:gltf` geometry loader for glTF or GLB models that should be baked once at
 resource-load time and do not need animation playback:
 
