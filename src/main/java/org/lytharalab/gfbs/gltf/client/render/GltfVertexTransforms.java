@@ -121,7 +121,8 @@ public final class GltfVertexTransforms {
         float tz = 0.0f;
         int offset = vertex * 4;
         for (int i = 0; i < 4; i++) {
-            float weight = Math.max(0.0f, weights[offset + i]);
+            float weight = weights[offset + i];
+            if (weight <= 0.0f) continue;
             int joint = Math.max(0, Math.min(jointCount - 1, joints[offset + i]));
             int matrix = joint * 16;
             px += (palette[matrix] * x + palette[matrix + 4] * y

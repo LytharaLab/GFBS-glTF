@@ -1,4 +1,23 @@
-# Migrating to 1.6.1
+# Migrating to 1.6
+
+## From 1.6.1 to 1.6.2
+
+The existing `GltfRenderer.render(...)` overloads select GPU skinning automatically for eligible
+opaque and cutout triangles. If your renderer relies on deferred batching for skinned geometry,
+set `instance.renderOptions().skinning(GltfRenderOptions.SkinningMode.CPU)` on that instance.
+Active morphs, blended materials, custom passes, and shader-pack passes keep using the streamed
+path and benefit from the CPU deformation cache.
+
+If your importer or authoring tool enforced a 48-joint limit, use `GltfSkin.MAX_JOINTS` and
+`GltfSkin.jointCount()`. The asset now supports up to 65,536 joints per skin, and the GPU accepts
+a compact palette sized against the current device. The decoded array budget includes all skin
+indices and inverse bind matrices.
+
+Use a dependency range starting at `[1.6.2,2.0.0)` when calling the new skinning, verification,
+or diagnostics API. See [Skeletal skinning](1.x-API.md#skeletal-skinning) and
+[Render diagnostics](1.x-API.md#render-diagnostics).
+
+## From 1.5.1 to 1.6.1
 
 GFBS glTF 1.6.1 targets Minecraft Forge 1.20.1 and Java 17. Existing constructors, animation
 timelines, node selectors, material overrides, and plugin entry points remain available.

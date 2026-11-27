@@ -26,8 +26,8 @@ GFBS: glTF loads animated models from Minecraft resources and exposes a reusable
 
 | Component | Version |
 | --- | --- |
-| GFBS: glTF | `1.6.1` |
-| Public API | `1.6.1` |
+| GFBS: glTF | `1.6.2` |
+| Public API | `1.6.2` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.21` |
 | Java | `17` |
@@ -46,6 +46,10 @@ GFBS: glTF does not require Embeddium, Oculus, or Iris. Oculus and Iris are dete
   operations, self/subtree visibility, TRS/matrix/post-transform overrides, morph weights, render,
   shadow, collision, custom parameters, and per-primitive state.
 - Translation, rotation, scale, skinning, morph targets, generated normals, tangents, vertex colors, and two UV sets.
+- GPU skeletal skinning with shared indexed geometry, compact joint palettes, and up to 65,536
+  joints per skin. Compatible base and emissive passes can share the GPU-deformed vertices.
+- Incremental joint palette updates, cached CPU skinning and morph targets, and render diagnostics
+  for checking cache reuse, backend selection, and CPU submission time.
 - Complete glTF 2.0 metallic-roughness material ingestion: base color, metallic-roughness,
   normal, occlusion, emissive, alpha modes/cutoff, double-sided state, and sampler state.
 - Independent UV selection for every material texture, `KHR_texture_transform`,
@@ -89,16 +93,20 @@ and use the existing skin, morph, visibility, culling, lighting, and resident-ge
 See [Plugin development](docs/PLUGINS.md) for registration, dependencies, lifecycle rules, custom
 extension points, and a non-invasive glow-pass example.
 
-## Scene rendering in 1.6.1
+## Scene rendering in 1.6.2
 
 Large scenes use a shared spatial index to select candidate nodes before resolving mutable state.
 Moved and animated subtrees remain candidates even after leaving their authored bounds. Large
 rigid triangle primitives receive spatial sections that share the original vertex arrays.
 
-Without an active shader pack, larger rigid parts reuse resident GPU geometry shared across mesh
-occurrences and material layouts. Tiny parts in large scenes stream into Minecraft's buffers to
-reduce draw calls. With Iris/Oculus, native triangles pass through the caller's entity buffers so
-the pipeline can supply its entity IDs, tangents, render phases, and shadow shaders.
+Without an active shader pack, built-in opaque and cutout skinned triangles use GPU skinning when
+the device supports it. Instances share vertex and index buffers even when they use different
+poses or materials. Active morphs, translucent draws, custom RenderTypes, and Iris/Oculus shader-pack
+passes use the CPU deformation cache and the caller's entity buffers.
+
+Use `GltfRenderOptions.SkinningMode.CPU` to select CPU skinning for an instance. The client API
+also provides `GltfRenderer.verifySkinning(...)` for CPU/GPU vertex readback and
+`GltfRenderer.diagnostics()` for submission and cache counters. See the [rendering API](docs/1.x-API.md#skeletal-skinning).
 
 The default client loader prepares scene plans and spatial data on its loading worker. Textures
 upload on first use, GPU caches evict cold entries at frame boundaries, and runtime node/primitive
@@ -131,7 +139,8 @@ Set-Location GFBS-glTF
 .\gradlew.bat build
 ```
 
-The built JAR is written to `build/libs/`.
+The distributable JAR is `build/libs/gfbs_gltf-1.6.2-all.jar`. It bundles the glTF parser
+and its runtime dependencies.
 
 Run the test suite with:
 
@@ -144,6 +153,9 @@ Run the complete Gradle verification lifecycle with:
 ```bash
 ./gradlew check
 ```
+
+Run the real GPU acceptance test on a desktop OpenGL client with `./gradlew runGpuSkinningTest`.
+See [Performance and verification](docs/PERFORMANCE.md#162-verification).
 
 ## Quick start
 

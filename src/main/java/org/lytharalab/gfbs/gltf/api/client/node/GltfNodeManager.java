@@ -11,7 +11,6 @@ import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
 import org.lytharalab.gfbs.gltf.api.model.GltfMeshAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
-import org.lytharalab.gfbs.gltf.api.model.GltfSkinAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitiveAccess;
@@ -42,6 +41,8 @@ import net.minecraft.client.renderer.RenderType;
  * morph overrides without mutating the asset or animation controller.</p>
  */
 public final class GltfNodeManager {
+    private static final long SKIN_PALETTE_BUDGET = 16L * 1024 * 1024;
+    private static final int SKIN_PALETTE_ENTRIES = 1024;
     private final GltfAsset asset;
     private final GltfNodeState[] nodes;
     private final Map<GltfPrimitiveKey, GltfPrimitiveState> primitives = new LinkedHashMap<>();
@@ -62,13 +63,18 @@ public final class GltfNodeManager {
     private final float[] bindTranslation = new float[3];
     private final float[] bindRotation = new float[4];
     private final float[] bindScale = new float[3];
-    private final Map<Integer, SkinPalette> skinPalettes = new LinkedHashMap<>();
+    private final Map<SkinPaletteKey, SkinPalette> skinPalettes = new LinkedHashMap<>(16, 0.75f, true);
+    private long skinPaletteBytes;
+    private long skinMatrixComputations;
     private ModelPose cachedWorldPose;
     private long cachedWorldPoseRevision = Long.MIN_VALUE;
     private long cachedWorldPoseSignature = Long.MIN_VALUE;
     private long cachedWorldNodeRevision = Long.MIN_VALUE;
     private boolean cachedWorldWasWritable;
     private long worldGeneration;
+    private long worldResetGeneration;
+    private long[] worldMatrixChanges;
+    private float[] nextWorldMatrix;
     private long revision;
     private long collisionRevision;
     private long transformRevision;
@@ -327,7 +333,7 @@ public final class GltfNodeManager {
         boolean bind = !externallyWritable && poseRevision == 0 && transformOverrides.isEmpty();
         if (bind) {
             float[] shared = GltfAssetAccess.bindWorldMatrices(asset);
-            if (resolvedWorld != shared) worldGeneration++;
+            if (resolvedWorld != shared) worldResetGeneration = ++worldGeneration;
             dirtyTransforms.clear();
             return resolvedWorld = shared;
         }
@@ -336,6 +342,12 @@ public final class GltfNodeManager {
             || cachedWorldPoseRevision != poseRevision || cachedWorldNodeRevision != transformRevision
             || cachedWorldPoseSignature != signature || cachedWorldWasWritable != externallyWritable
             || resolvedWorld != worldMatrices) {
+            worldGeneration++;
+            if (resolvedWorld != worldMatrices) worldResetGeneration = worldGeneration;
+            if (worldMatrixChanges == null && !asset.skins().isEmpty()) {
+                worldMatrixChanges = new long[nodes.length];
+                nextWorldMatrix = new float[16];
+            }
             if (externallyWritable) recomputeWorldMatrices(pose);
             else updateManagedWorld(pose, poseRevision);
             cachedWorldPose = pose;
@@ -343,7 +355,6 @@ public final class GltfNodeManager {
             cachedWorldNodeRevision = transformRevision;
             cachedWorldPoseSignature = signature;
             cachedWorldWasWritable = externallyWritable;
-            worldGeneration++;
         }
         return resolvedWorld = worldMatrices;
     }
@@ -351,6 +362,7 @@ public final class GltfNodeManager {
     private void updateManagedWorld(ModelPose pose, long poseRevision) {
         if (worldMatrices == null || resolvedWorld != worldMatrices || cachedWorldWasWritable
             || cachedWorldPose != pose) {
+            worldResetGeneration = worldGeneration;
             float[] bind = GltfAssetAccess.bindWorldMatrices(asset);
             if (worldMatrices == null) worldMatrices = bind.clone();
             else System.arraycopy(bind, 0, worldMatrices, 0, bind.length);
@@ -449,14 +461,28 @@ public final class GltfNodeManager {
         }
         int outputOffset = index * 16;
         int parent = definition.parent();
-        if (parent < 0) System.arraycopy(worldLocalScratch, 0, worldMatrices, outputOffset, 16);
-        else PoseTransforms.multiplyInto(worldMatrices, parent * 16, worldLocalScratch, 0, worldMatrices, outputOffset);
+        if (worldMatrixChanges == null) {
+            if (parent < 0) System.arraycopy(worldLocalScratch, 0, worldMatrices, outputOffset, 16);
+            else PoseTransforms.multiplyInto(worldMatrices, parent * 16, worldLocalScratch, 0, worldMatrices, outputOffset);
+            return;
+        }
+        float[] next = worldLocalScratch;
+        if (parent >= 0) {
+            PoseTransforms.multiplyInto(worldMatrices, parent * 16, worldLocalScratch, 0, nextWorldMatrix, 0);
+            next = nextWorldMatrix;
+        }
+        if (!Arrays.equals(next, 0, 16, worldMatrices, outputOffset, outputOffset + 16)) {
+            System.arraycopy(next, 0, worldMatrices, outputOffset, 16);
+            worldMatrixChanges[index] = worldGeneration;
+        }
     }
 
     private static long poseSignature(ModelPose pose) {
         long result = 0xcbf29ce484222325L;
         for (int node = 0; node < pose.nodeCount(); node++) {
-            var value = pose.node(node);
+            var value = AnimationPoseAccess.nodeOrNull(pose, node);
+            if (value == null) continue;
+            result = (result ^ node) * 0x100000001b3L;
             for (float component : value.translation()) {
                 result = (result ^ Float.floatToRawIntBits(component)) * 0x100000001b3L;
             }
@@ -499,20 +525,44 @@ public final class GltfNodeManager {
 
     /** Uses the already resolved matrix view from this manager without rechecking the pose. */
     public float[] computeSkinPaletteView(GltfSkin skin, int meshNode, float[] world) {
+        return skinPaletteView(skin, meshNode, world, null).matrices();
+    }
+
+    /** Internal render view. A compact joint layout is immutable and shared by its geometry. */
+    public SkinPalette skinPaletteView(GltfSkin skin, int meshNode, float[] world, int[] jointSlots) {
         Objects.checkIndex(meshNode, nodes.length);
         Objects.requireNonNull(skin, "skin");
+        if (jointSlots != null && jointSlots.length > skin.jointCount()) {
+            throw new IllegalArgumentException("Compact palette exceeds the skin's joint count");
+        }
         if (world != resolvedWorld || world == null) throw new IllegalArgumentException("Stale world view");
-        SkinPalette palette = skinPalettes.get(meshNode);
-        if (palette == null || palette.skin != skin) {
-            palette = new SkinPalette(skin);
-            skinPalettes.put(meshNode, palette);
+        SkinPaletteKey key = new SkinPaletteKey(skin, meshNode, jointSlots);
+        SkinPalette palette = skinPalettes.get(key);
+        if (palette == null) {
+            int count = jointSlots == null ? skin.jointCount() : jointSlots.length;
+            palette = new SkinPalette(count);
+            var entries = skinPalettes.values().iterator();
+            while (skinPalettes.size() >= SKIN_PALETTE_ENTRIES || skinPaletteBytes + palette.bytes() > SKIN_PALETTE_BUDGET) {
+                skinPaletteBytes -= entries.next().bytes();
+                entries.remove();
+            }
+            skinPalettes.put(key, palette);
+            skinPaletteBytes += palette.bytes();
         }
-        if (palette.generation != worldGeneration) {
-            PoseTransforms.computeSkinPaletteInto(skin, meshNode, world, palette.matrices);
-            palette.generation = worldGeneration;
+        if (palette.checkedRevision != worldGeneration) {
+            boolean all = worldMatrixChanges == null || palette.checkedRevision < worldResetGeneration
+                || worldMatrixChanges[meshNode] > palette.checkedRevision;
+            int updated = PoseTransforms.updateSkinPaletteInto(skin, meshNode, world, jointSlots, palette.matrices,
+                all ? null : worldMatrixChanges, palette.checkedRevision);
+            skinMatrixComputations += updated;
+            if (updated > 0) palette.revision = worldGeneration;
+            palette.checkedRevision = worldGeneration;
         }
-        return palette.matrices;
+        return palette;
     }
+
+    /** Number of joint palette matrices this instance has computed since creation. */
+    public long skinMatrixComputations() { return skinMatrixComputations; }
 
     /** Returns the current transform in model space, before the instance's placement. */
     public float[] modelMatrix(int index, AnimationController controller) {
@@ -682,15 +732,18 @@ public final class GltfNodeManager {
         @Override public int size() { return nodes.length; }
     }
 
-    private static final class SkinPalette {
-        final GltfSkin skin;
-        final float[] matrices;
-        long generation = Long.MIN_VALUE;
+    private record SkinPaletteKey(GltfSkin skin, int meshNode, int[] jointSlots) {}
 
-        SkinPalette(GltfSkin skin) {
-            this.skin = skin;
-            matrices = new float[Math.multiplyExact(GltfSkinAccess.joints(skin).length, 16)];
-        }
+    /** Internal palette view. Matrices are column-major and belong to the instance cache. */
+    public static final class SkinPalette {
+        private final float[] matrices;
+        private long checkedRevision = Long.MIN_VALUE;
+        private long revision;
+
+        private SkinPalette(int joints) { matrices = new float[joints * 16]; }
+        private long bytes() { return (long) matrices.length * Float.BYTES; }
+        public float[] matrices() { return matrices; }
+        public long revision() { return revision; }
     }
 
     private static float[] slice(float[] matrices, int index) {

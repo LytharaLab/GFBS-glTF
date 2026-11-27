@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /** GPU resources and draw topology shared by all instances of an immutable asset. */
 final class GltfGpuModel {
@@ -34,7 +35,8 @@ final class GltfGpuModel {
     final boolean hasEmission;
     private final GltfGpuTextures textures;
     private final PreparedAsset prepared;
-    private final Map<GeometryKey, Geometry> geometry = new LinkedHashMap<>(64, 0.75f, true);
+    private final Map<GeometryKey, Geometry<GltfGpuPrimitive>> geometry = new LinkedHashMap<>(64, 0.75f, true);
+    private final Map<GltfPrimitive, Geometry<GltfSkinnedGeometry>> skinnedGeometry = new LinkedHashMap<>();
     private long geometryBytes;
     long lastFrame = GltfGpuCache.frame();
 
@@ -87,7 +89,7 @@ final class GltfGpuModel {
                 material.emissiveGreen(), material.emissiveBlue(), 1.0f, AlphaMode.OPAQUE)
             : new GeometryKey(plan.primitive, section, pass, material.baseColorTextureInfo(), material.baseColorRed(),
                 material.baseColorGreen(), material.baseColorBlue(), material.baseColorAlpha(), material.alphaMode());
-        Geometry cached = geometry.get(key);
+        Geometry<GltfGpuPrimitive> cached = geometry.get(key);
         if (cached != null) {
             cached.lastFrame = GltfGpuCache.frame();
             return cached.buffer;
@@ -95,26 +97,55 @@ final class GltfGpuModel {
 
         long bytes = section == null ? GltfGpuPrimitive.estimatedBytes(plan.primitive)
             : (long) section.vertices() * org.lytharalab.gfbs.gltf.api.client.GltfRenderTypes.REQUIRED_FORMAT.getVertexSize();
-        if (bytes > GEOMETRY_BUDGET) return null;
         // A scene larger than the resident budget can keep its already resident hot meshes while
         // streaming the excess. Avoid destroying freshly used buffers and reuploading every frame.
-        if (geometry.size() >= MAX_GEOMETRY_ENTRIES || geometryBytes + bytes > GEOMETRY_BUDGET
-            || !GltfGpuCache.hasGeometrySpace(bytes)) return null;
+        if (!canAllocateGeometry(bytes)) return null;
         GltfGeometryPipeline.MaterialPass materialPass = emissive
             ? GltfGeometryPipeline.MaterialPass.emissiveGpu(material)
             : GltfGeometryPipeline.MaterialPass.base(material, 1.0f, 1.0f, 1.0f);
         try {
             GltfGpuPrimitive compiled = GltfGpuPrimitive.compile(plan.primitive, material, materialPass, section);
-            geometry.put(key, new Geometry(compiled, bytes));
+            geometry.put(key, new Geometry<>(compiled, bytes));
             geometryBytes += bytes;
             GltfGpuCache.geometryAllocated(bytes);
             return compiled;
         } catch (RuntimeException failure) {
-            geometry.put(key, new Geometry(null, 0));
+            geometry.put(key, new Geometry<>(null, 0));
             GFBSglTF.LOGGER.warn("Streaming glTF geometry after GPU upload failed for {} mesh {} primitive {}",
                 asset.id(), plan.meshIndex, plan.primitiveIndex, failure);
             return null;
         }
+    }
+
+    GltfSkinnedGeometry skinnedGeometry(GltfPrimitive primitive, int maxPaletteJoints) {
+        Geometry<GltfSkinnedGeometry> cached = skinnedGeometry.get(primitive);
+        if (cached != null) {
+            cached.lastFrame = GltfGpuCache.frame();
+            GltfRenderMetrics metrics = GltfRenderMetrics.active();
+            if (metrics != null && cached.buffer != null) metrics.gpuGeometryCacheHits++;
+            return cached.buffer;
+        }
+        long bytes = GltfSkinnedGeometry.estimatedBytes(primitive);
+        if (!canAllocateGeometry(bytes)) return null;
+        try {
+            GltfSkinnedGeometry compiled = GltfSkinnedGeometry.compile(primitive, maxPaletteJoints);
+            long allocated = compiled == null ? 0 : bytes;
+            skinnedGeometry.put(primitive, new Geometry<>(compiled, allocated));
+            geometryBytes += allocated;
+            GltfGpuCache.geometryAllocated(allocated);
+            GltfRenderMetrics metrics = GltfRenderMetrics.active();
+            if (metrics != null && compiled != null) metrics.gpuGeometryUploads++;
+            return compiled;
+        } catch (RuntimeException | LinkageError failure) {
+            skinnedGeometry.put(primitive, new Geometry<>(null, 0));
+            GFBSglTF.LOGGER.warn("Using CPU skinning after a GPU geometry upload failed for {}", asset.id(), failure);
+            return null;
+        }
+    }
+
+    private boolean canAllocateGeometry(long bytes) {
+        return geometry.size() + skinnedGeometry.size() < MAX_GEOMETRY_ENTRIES
+            && geometryBytes + bytes <= GEOMETRY_BUDGET && GltfGpuCache.hasGeometrySpace(bytes);
     }
 
     private static ScenePlan compileScenePlan(GltfAsset asset, int scene) {
@@ -168,24 +199,33 @@ final class GltfGpuModel {
     ResourceLocation emissiveTexture(GltfMaterial material) { return textures.emissive(material); }
 
     void releaseCold(long frame) {
-        var entries = geometry.values().iterator();
+        releaseGeometry(geometry, frame, GltfGpuPrimitive::close);
+        releaseGeometry(skinnedGeometry, frame, GltfSkinnedGeometry::close);
+        textures.releaseCold(frame);
+    }
+
+    private <T> void releaseGeometry(Map<?, Geometry<T>> cache, long frame, Consumer<T> close) {
+        var entries = cache.values().iterator();
         while (entries.hasNext()) {
-            Geometry entry = entries.next();
+            Geometry<T> entry = entries.next();
             if (frame - entry.lastFrame <= COLD_FRAMES) continue;
             entries.remove();
             geometryBytes -= entry.bytes;
             GltfGpuCache.geometryAllocated(-entry.bytes);
-            if (entry.buffer != null) entry.buffer.close();
+            if (entry.buffer != null) close.accept(entry.buffer);
         }
-        textures.releaseCold(frame);
     }
 
     void delete() {
         RenderSystem.assertOnRenderThread();
-        for (Geometry entry : geometry.values()) {
+        for (Geometry<GltfGpuPrimitive> entry : geometry.values()) {
+            if (entry.buffer != null) entry.buffer.close();
+        }
+        for (Geometry<GltfSkinnedGeometry> entry : skinnedGeometry.values()) {
             if (entry.buffer != null) entry.buffer.close();
         }
         geometry.clear();
+        skinnedGeometry.clear();
         GltfGpuCache.geometryAllocated(-geometryBytes);
         geometryBytes = 0;
         textures.close();
@@ -248,12 +288,12 @@ final class GltfGpuModel {
                                GltfTextureInfo uv, float red, float green, float blue,
                                float alpha, AlphaMode alphaMode) {}
 
-    private static final class Geometry {
-        final GltfGpuPrimitive buffer;
+    private static final class Geometry<T> {
+        final T buffer;
         final long bytes;
         long lastFrame = GltfGpuCache.frame();
 
-        Geometry(GltfGpuPrimitive buffer, long bytes) {
+        Geometry(T buffer, long bytes) {
             this.buffer = buffer;
             this.bytes = bytes;
         }

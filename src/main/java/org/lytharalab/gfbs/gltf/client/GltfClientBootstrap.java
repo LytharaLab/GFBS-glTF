@@ -3,6 +3,7 @@ package org.lytharalab.gfbs.gltf.client;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ModelEvent;
 import net.minecraftforge.client.event.RegisterClientReloadListenersEvent;
+import net.minecraftforge.client.event.RegisterShadersEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.Mod;
@@ -11,6 +12,7 @@ import org.lytharalab.gfbs.gltf.GFBSglTF;
 import org.lytharalab.gfbs.gltf.client.model.StaticGltfGeometryLoader;
 import org.lytharalab.gfbs.gltf.client.model.GltfGeneratedMaterialPack;
 import org.lytharalab.gfbs.gltf.client.render.GltfGpuCache;
+import org.lytharalab.gfbs.gltf.client.render.GltfGpuSkinning;
 import org.lytharalab.gfbs.gltf.client.resource.ClientGltfModels;
 
 /** Keeps every Minecraft client class out of dedicated-server class loading. */
@@ -42,5 +44,10 @@ public final class GltfClientBootstrap {
     public static void registerReloadListeners(RegisterClientReloadListenersEvent event) {
         event.registerReloadListener(ClientGltfModels.getInstance());
         event.registerReloadListener(StaticGltfGeometryLoader.INSTANCE);
+    }
+
+    @SubscribeEvent
+    public static void registerShaders(RegisterShadersEvent event) {
+        GltfGpuSkinning.registerShaders(event);
     }
 }

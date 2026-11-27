@@ -10,6 +10,7 @@ public final class GltfPrimitive {
     private final int vertexCount;
     private final float[] positions, normals, tangents, texCoords0, texCoords1, colors, weights;
     private final int[] joints, indices;
+    private final int maxJointIndex;
     private final List<MorphTarget> morphTargets;
     private final GltfBounds bounds;
 
@@ -37,11 +38,14 @@ public final class GltfPrimitive {
         if ((this.joints == null) != (this.weights == null)) {
             throw new IllegalArgumentException("JOINTS_0 and WEIGHTS_0 must either both be present or both be absent");
         }
+        int highestJoint = -1;
         if (this.joints != null) {
             for (int joint : this.joints) {
                 if (joint < 0) throw new IllegalArgumentException("Joint indices must be non-negative");
+                highestJoint = Math.max(highestJoint, joint);
             }
         }
+        maxJointIndex = highestJoint;
         this.indices = indices == null ? null : indices.clone();
         if (this.indices != null) {
             for (int index : this.indices) {
@@ -168,6 +172,7 @@ public final class GltfPrimitive {
     float[] texCoords1View() { return texCoords1; }
     float[] colorsView() { return colors; }
     int[] jointsView() { return joints; }
+    int maxJointIndex() { return maxJointIndex; }
     float[] weightsView() { return weights; }
     int[] indicesView() { return indices; }
 }

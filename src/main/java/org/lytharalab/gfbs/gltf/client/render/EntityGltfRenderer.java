@@ -18,6 +18,7 @@ import org.lytharalab.gfbs.gltf.api.client.GltfRenderContext;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderOptions;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderPart;
 import org.lytharalab.gfbs.gltf.api.client.GltfRenderTypes;
+import org.lytharalab.gfbs.gltf.api.client.node.GltfNodeManager.SkinPalette;
 import org.lytharalab.gfbs.gltf.api.client.plugin.ClientGltfExtensionPoints;
 import org.lytharalab.gfbs.gltf.api.client.plugin.GltfBuiltInRenderPass;
 import org.lytharalab.gfbs.gltf.api.client.plugin.GltfCustomRenderPass;
@@ -34,7 +35,6 @@ import org.lytharalab.gfbs.gltf.api.model.GltfMaterial;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitiveAccess;
 import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
-import org.lytharalab.gfbs.gltf.api.model.GltfSkinAccess;
 import org.lytharalab.gfbs.gltf.api.plugin.GltfExtensionEntry;
 import org.lytharalab.gfbs.gltf.api.plugin.GltfPlugins;
 
@@ -44,12 +44,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Universal glTF renderer with a resident-GPU fast path for rigid animated geometry.
- *
- * <p>Rigid primitives are compiled once into node-local {@link com.mojang.blaze3d.vertex.VertexBuffer}
- * objects and subsequently animated only by changing their model-view matrix. Skin/morph/custom
- * cases retain a compatibility CPU path, but that path is also allocation-conscious and no longer
- * clones the complete primitive arrays every pass.</p>
+ * Renders resident rigid and skinned meshes, with streamed geometry for compatibility passes.
  */
 public final class EntityGltfRenderer {
     private static final Set<RenderType> WARNED_TYPES = ConcurrentHashMap.newKeySet();
@@ -68,14 +63,12 @@ public final class EntityGltfRenderer {
         if (reusable.busy) {
             BufferBuilder builder = new BufferBuilder(8192);
             MultiBufferSource.BufferSource buffers = MultiBufferSource.immediate(builder);
-            render(instance, poseStack, buffers, packedLight, packedOverlay, context);
-            buffers.endBatch();
+            render(instance, poseStack, buffers, packedLight, packedOverlay, context, true);
             return;
         }
         reusable.busy = true;
         try {
-            render(instance, poseStack, reusable.buffers, packedLight, packedOverlay, context);
-            reusable.buffers.endBatch();
+            render(instance, poseStack, reusable.buffers, packedLight, packedOverlay, context, true);
         } finally {
             reusable.busy = false;
         }
@@ -83,16 +76,32 @@ public final class EntityGltfRenderer {
 
     public static void render(GltfInstance instance, PoseStack poseStack, MultiBufferSource buffers,
                               int packedLight, int packedOverlay, GltfRenderContext context) {
-        if (!instance.visible() || instance.asset().scenes().isEmpty()) return;
+        render(instance, poseStack, buffers, packedLight, packedOverlay, context, false);
+    }
+
+    private static void render(GltfInstance instance, PoseStack poseStack, MultiBufferSource buffers,
+                               int packedLight, int packedOverlay, GltfRenderContext context, boolean ownBuffers) {
+        if (!instance.visible() || instance.asset().scenes().isEmpty()) {
+            if (ownBuffers) flush(buffers);
+            return;
+        }
         RenderSystem.assertOnRenderThread();
+        GltfRenderMetrics metrics = GltfRenderMetrics.active();
+        long start = metrics == null ? 0 : System.nanoTime();
         RenderScratch scratch = SCRATCH.get();
         if (scratch.busy) scratch = new RenderScratch();
         scratch.busy = true;
         try {
             renderInternal(instance, poseStack, buffers, packedLight, packedOverlay, context, scratch);
+            if (ownBuffers) flush(buffers);
         } finally {
             scratch.blended.clear();
+            scratch.releaseDeformations();
             scratch.busy = false;
+            if (metrics != null) {
+                metrics.renderCalls++;
+                metrics.cpuSubmissionNanos += System.nanoTime() - start;
+            }
         }
     }
 
@@ -148,7 +157,7 @@ public final class EntityGltfRenderer {
                     renderPass(
                         instance, gpu, scene, buffers, options, cullingContext, shaderPack, true,
                         false, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion,
-                        scratch, selection
+                        scratch, selection, false
                     );
                 }
                 if (pluginFrame != null) {
@@ -159,7 +168,7 @@ public final class EntityGltfRenderer {
                     renderPass(
                         instance, gpu, scene, buffers, options, context, shaderPack, false,
                         false, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion,
-                        scratch, selection
+                        scratch, selection, pluginFrame == null
                     );
                 }
                 if (pluginFrame != null) {
@@ -170,7 +179,7 @@ public final class EntityGltfRenderer {
                     renderPass(
                         instance, gpu, scene, buffers, options, context, shaderPack, false,
                         true, pose, world, base, packedLight, packedOverlay, useOcclusion, occlusion,
-                        scratch, selection
+                        scratch, selection, false
                     );
                 }
                 if (pluginFrame != null) {
@@ -235,8 +244,11 @@ public final class EntityGltfRenderer {
         boolean useOcclusion,
         GltfOcclusionCuller occlusion,
         RenderScratch scratch,
-        GltfSceneIndex.Selection selection
+        GltfSceneIndex.Selection selection,
+        boolean captureDeformation
     ) {
+        boolean allowGpuSkinning = !shaderPack && !shadowPass && buffers instanceof MultiBufferSource.BufferSource
+            && options.skinningMode() == GltfRenderOptions.SkinningMode.AUTO;
         GltfGpuModel.NodePlan[] nodes = scene.nodes;
         int count = selection == null ? nodes.length : selection.size();
         for (int planIndex = 0; planIndex < count; planIndex++) {
@@ -255,9 +267,8 @@ public final class EntityGltfRenderer {
             scratch.model.set(base).mul(scratch.world);
             boolean mirrored = scratch.model.determinant3x3() < 0.0f;
             boolean normalReady = false;
-            float[] skin = null;
-            int jointCount = 0;
-            boolean skinReady = false;
+            SkinPalette skin = null;
+            GltfSkin skinDefinition = nodePlan.node.skin() < 0 ? null : instance.asset().skins().get(nodePlan.node.skin());
 
             for (GltfGpuModel.PrimitivePlan primitivePlan : nodePlan.primitives) {
                 GltfPrimitive primitive = primitivePlan.primitive();
@@ -269,9 +280,7 @@ public final class EntityGltfRenderer {
                 float[] morphWeights = primitive.morphTargets().isEmpty() ? null
                     : instance.nodes().resolveMorphWeightsView(nodeIndex, primitivePlan.mesh(), pose);
                 boolean activeMorph = GltfVertexTransforms.hasActiveMorph(primitive, morphWeights);
-                boolean skinnedGeometry = nodePlan.node.skin() >= 0
-                    && GltfPrimitiveAccess.joints(primitive) != null
-                    && GltfPrimitiveAccess.weights(primitive) != null;
+                boolean skinnedGeometry = skinDefinition != null;
                 boolean dynamicGeometry = activeMorph || skinnedGeometry;
 
                 GltfMaterial material = primitiveState.effectiveMaterial();
@@ -322,6 +331,10 @@ public final class EntityGltfRenderer {
                     && !blended && noCustomRenderType
                     && (emissivePass || material.unlit() || GltfVertexTransforms.conformal(scratch.model))
                     && !(emissivePass && material.alphaMode() == AlphaMode.MASK);
+                int maxGpuJoints = allowGpuSkinning && skinnedGeometry && !activeMorph && !blended
+                    && noCustomRenderType && GltfGeometryPipeline.isTriangleMode(primitive.mode())
+                    && !(emissivePass && material.alphaMode() == AlphaMode.MASK)
+                    ? GltfGpuSkinning.maxPaletteJoints() : 0;
 
                 List<GltfMaterialBaker.Page> pages = emissivePass
                     ? GltfGpuModel.ORIGINAL_UV : gpu.materialPages(primitive, material, shaderPack || shadowPass, options);
@@ -377,44 +390,38 @@ public final class EntityGltfRenderer {
                         }
 
                         if (!normalReady) {
-                            scratch.normal.set(scratch.model);
-                            float determinant = scratch.normal.determinant();
-                            if (Float.isFinite(determinant) && Math.abs(determinant) > 1.0e-10f) {
-                                scratch.normal.invert().transpose();
-                            } else {
-                                scratch.normal.identity();
-                            }
+                            scratch.computeNormal();
                             normalReady = true;
-                        }
-                        if (!skinReady && skinnedGeometry) {
-                            GltfSkin gltfSkin = instance.asset().skins().get(nodePlan.node.skin());
-                            jointCount = GltfSkinAccess.joints(gltfSkin).length;
-                            skin = instance.nodes().computeSkinPaletteView(
-                                gltfSkin, nodeIndex, world
-                            );
-                            skinReady = true;
                         }
                         GltfGeometryPipeline.MaterialPass materialPass = emissivePass
                             ? GltfGeometryPipeline.MaterialPass.emissive(material, red, green, blue)
                             : GltfGeometryPipeline.MaterialPass.base(gpu.materialUv(material, shaderPack || shadowPass), red, green, blue).withPage(page);
+                        if (maxGpuJoints > 0) {
+                            GltfSkinnedGeometry resident = gpu.skinnedGeometry(primitive, maxGpuJoints);
+                            if (resident != null && drawSkinned(instance, primitiveState, resident, skinDefinition,
+                                nodeIndex, world, scratch, renderType, material, materialPass, light, packedOverlay,
+                                alpha, mirrored, captureDeformation && material.alphaMode() != AlphaMode.MASK
+                                    && GltfGeometryPipeline.hasVisibleEmission(material))) continue;
+                        }
+                        float[] activeWeights = activeMorph ? morphWeights : null;
                         if (blended && !shadowPass && !emissivePass && noCustomRenderType) {
-                            scratch.blended.add(new BlendedDraw(renderType, primitive, material, materialPass,
-                                new Matrix4f(scratch.model), new Matrix3f(scratch.normal), skin, jointCount,
-                                morphWeights, light, packedOverlay, alpha, distanceSquared(primitive, scratch.model)));
+                            scratch.blended.add(new BlendedDraw(renderType, primitiveState, material, materialPass,
+                                new Matrix4f(scratch.model), new Matrix3f(scratch.normal), skinDefinition,
+                                activeWeights, light, packedOverlay, alpha, distanceSquared(primitive, scratch.model)));
                             continue;
                         }
-                        GltfGeometryPipeline.emit(
-                            buffers.getBuffer(renderType), primitive, material, materialPass,
-                            scratch.model, scratch.normal, skin, jointCount, morphWeights,
-                            light, packedOverlay, alpha, section
-                        );
+                        if (skin == null && skinnedGeometry) {
+                            skin = GltfRenderMetrics.palette(instance.nodes(), skinDefinition, nodeIndex, world, null);
+                        }
+                        emitCpu(instance, buffers, renderType, primitiveState, material, materialPass,
+                            scratch.model, scratch.normal, skin, activeWeights, light, packedOverlay, alpha, section);
                     }
                 }
             }
         }
         if (!scratch.blended.isEmpty()) {
             scratch.blended.sort(java.util.Comparator.comparingDouble(BlendedDraw::distance).reversed());
-            for (BlendedDraw draw : scratch.blended) draw.emit(buffers);
+            for (BlendedDraw draw : scratch.blended) draw.emit(instance, buffers, world);
             scratch.blended.clear();
         }
     }
@@ -456,9 +463,7 @@ public final class EntityGltfRenderer {
             scratch.world.set(world, nodeIndex * 16);
             scratch.model.set(base).mul(scratch.world);
             boolean normalReady = false;
-            float[] skin = null;
-            int jointCount = 0;
-            boolean skinReady = false;
+            SkinPalette skin = null;
 
             for (GltfGpuModel.PrimitivePlan primitivePlan : nodePlan.primitives) {
                 GltfPrimitive primitive = primitivePlan.primitive();
@@ -581,22 +586,12 @@ public final class EntityGltfRenderer {
                     }
 
                     if (!normalReady) {
-                        scratch.normal.set(scratch.model);
-                        float determinant = scratch.normal.determinant();
-                        if (Float.isFinite(determinant) && Math.abs(determinant) > 1.0e-10f) {
-                            scratch.normal.invert().transpose();
-                        } else {
-                            scratch.normal.identity();
-                        }
+                        scratch.computeNormal();
                         normalReady = true;
                     }
-                    if (!skinReady && skinnedGeometry) {
+                    if (skin == null && skinnedGeometry) {
                         GltfSkin gltfSkin = instance.asset().skins().get(nodePlan.node.skin());
-                        jointCount = GltfSkinAccess.joints(gltfSkin).length;
-                        skin = instance.nodes().computeSkinPaletteView(
-                            gltfSkin, nodeIndex, world
-                        );
-                        skinReady = true;
+                        skin = GltfRenderMetrics.palette(instance.nodes(), gltfSkin, nodeIndex, world, null);
                     }
                     GltfGeometryPipeline.MaterialPass materialPass =
                         passKind == GltfGeometryPipeline.PassKind.EMISSIVE
@@ -607,11 +602,9 @@ public final class EntityGltfRenderer {
                                 gpu.materialUv(material, shaderPack || shadowPass), layerRed, layerGreen, layerBlue
                             );
                     if (passKind == GltfGeometryPipeline.PassKind.BASE) materialPass = materialPass.withPage(page);
-                    GltfGeometryPipeline.emit(
-                        buffers.getBuffer(renderType), primitive, material, materialPass,
-                        scratch.model, scratch.normal, skin, jointCount, morphWeights,
-                        light, packedOverlay, layerAlpha
-                    );
+                    emitCpu(instance, buffers, renderType, primitiveState, material, materialPass,
+                        scratch.model, scratch.normal, skin, activeMorph ? morphWeights : null,
+                        light, packedOverlay, layerAlpha, null);
                 }
             }
         }
@@ -789,13 +782,63 @@ public final class EntityGltfRenderer {
         return dx * dx + dy * dy + dz * dz;
     }
 
-    private record BlendedDraw(RenderType type, GltfPrimitive primitive, GltfMaterial material,
+    private static void emitCpu(GltfInstance instance, MultiBufferSource buffers, RenderType type,
+                                GltfPrimitiveState state, GltfMaterial material, GltfGeometryPipeline.MaterialPass pass,
+                                Matrix4f model, Matrix3f normal, SkinPalette skin, float[] weights, int light,
+                                int overlay, float alpha, GltfPrimitiveClusters.Section section) {
+        var consumer = buffers.getBuffer(type);
+        var prepared = GltfCpuDeformationCache.resolve(instance, state, weights, skin);
+        float[] palette = skin == null ? null : skin.matrices();
+        GltfGeometryPipeline.emit(consumer, state.definition(), material, pass, model, normal, palette,
+            palette == null ? 0 : palette.length / 16, weights, light, overlay, alpha, section, prepared);
+        GltfRenderMetrics metrics = GltfRenderMetrics.active();
+        if (metrics != null && palette != null) metrics.cpuSkinnedDraws++;
+    }
+
+    private static boolean drawSkinned(GltfInstance instance, GltfPrimitiveState state, GltfSkinnedGeometry geometry,
+                                       GltfSkin skin, int node, float[] world, RenderScratch scratch, RenderType type,
+                                       GltfMaterial material, GltfGeometryPipeline.MaterialPass pass,
+                                       int light, int overlay, float alpha, boolean mirrored, boolean capture) {
+        SkinPalette matrices = GltfRenderMetrics.palette(instance.nodes(), skin, node, world, geometry.jointSlots);
+        CapturedDeformation previous = scratch.deformations.get(state);
+        GltfGpuDeformationPool.Buffer deformed = null;
+        int texture;
+        if (previous != null && previous.geometry == geometry && previous.palette == matrices
+            && previous.revision == matrices.revision() && previous.buffer.current()) {
+            deformed = previous.buffer;
+            texture = deformed.texture;
+            GltfRenderMetrics metrics = GltfRenderMetrics.active();
+            if (metrics != null) metrics.gpuDeformationReuses++;
+        } else {
+            GltfSkinPaletteBuffer palette = GltfGpuSkinning.upload(matrices);
+            if (palette == null) return false;
+            texture = palette.texture();
+            if (capture) {
+                deformed = GltfGpuDeformationPool.capture(geometry, texture);
+                if (deformed != null) {
+                    if (previous != null) GltfGpuDeformationPool.release(previous.buffer);
+                    scratch.deformations.put(state, new CapturedDeformation(geometry, matrices, matrices.revision(), deformed));
+                    texture = deformed.texture;
+                }
+            }
+        }
+        GltfGpuSkinning.draw(geometry, texture, deformed != null, type, material, pass, scratch.model,
+            scratch.normal, light, overlay, alpha, mirrored);
+        return true;
+    }
+
+    private record CapturedDeformation(GltfSkinnedGeometry geometry, SkinPalette palette, long revision,
+                                       GltfGpuDeformationPool.Buffer buffer) {}
+
+    private record BlendedDraw(RenderType type, GltfPrimitiveState state, GltfMaterial material,
                                GltfGeometryPipeline.MaterialPass pass, Matrix4f model, Matrix3f normal,
-                               float[] skin, int joints, float[] weights, int light, int overlay,
+                               GltfSkin skin, float[] weights, int light, int overlay,
                                float alpha, double distance) {
-        void emit(MultiBufferSource buffers) {
-            GltfGeometryPipeline.emit(buffers.getBuffer(type), primitive, material, pass, model, normal,
-                skin, joints, weights, light, overlay, alpha);
+        void emit(GltfInstance instance, MultiBufferSource buffers, float[] world) {
+            SkinPalette palette = skin == null ? null
+                : GltfRenderMetrics.palette(instance.nodes(), skin, state.key().nodeIndex(), world, null);
+            emitCpu(instance, buffers, type, state, material, pass, model, normal, palette, weights, light,
+                overlay, alpha, null);
         }
     }
 
@@ -805,7 +848,22 @@ public final class EntityGltfRenderer {
         final Matrix3f normal = new Matrix3f();
         final GltfSceneIndex.Selection selection = new GltfSceneIndex.Selection();
         final java.util.ArrayList<BlendedDraw> blended = new java.util.ArrayList<>();
+        final java.util.IdentityHashMap<GltfPrimitiveState, CapturedDeformation> deformations =
+            new java.util.IdentityHashMap<>();
         boolean busy;
+
+        void computeNormal() {
+            normal.set(model);
+            float determinant = normal.determinant();
+            if (Float.isFinite(determinant) && Math.abs(determinant) > 1.0e-10f) normal.invert().transpose();
+            else normal.identity();
+        }
+
+        void releaseDeformations() {
+            if (deformations.isEmpty()) return;
+            for (CapturedDeformation entry : deformations.values()) GltfGpuDeformationPool.release(entry.buffer);
+            deformations.clear();
+        }
     }
 
     private static final class ImmediateBuffers {

@@ -3,6 +3,7 @@ package org.lytharalab.gfbs.gltf.api.client;
 import net.minecraft.resources.ResourceLocation;
 import org.joml.Matrix4f;
 import org.junit.jupiter.api.Test;
+import org.lytharalab.gfbs.gltf.api.animation.AnimationController;
 import org.lytharalab.gfbs.gltf.api.animation.ModelPose;
 import org.lytharalab.gfbs.gltf.api.client.material.GltfMaterialOverride;
 import org.lytharalab.gfbs.gltf.api.client.material.GltfMaterialVariant;
@@ -16,7 +17,9 @@ import org.lytharalab.gfbs.gltf.api.model.GltfMesh;
 import org.lytharalab.gfbs.gltf.api.model.GltfNode;
 import org.lytharalab.gfbs.gltf.api.model.GltfPrimitive;
 import org.lytharalab.gfbs.gltf.api.model.GltfScene;
+import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
 import org.lytharalab.gfbs.gltf.api.model.PrimitiveMode;
+import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -113,6 +116,52 @@ class GltfNodeManagerTest {
         float[] second = nodes.computeWorldMatricesView(pose, 0L);
         assertSame(first, second);
         assertEquals(7.0f, second[12]);
+    }
+
+    @Test
+    void updatesOnlyJointMatricesAffectedByTheResolvedWorldTransforms() {
+        float[] inverse = new float[32];
+        new Matrix4f().get(inverse, 0);
+        new Matrix4f().translation(-0.25f, 0.1f, 0.0f).get(inverse, 16);
+        GltfSkin skin = new GltfSkin("rig", 1, new int[]{1, 2}, inverse);
+        int[] empty = new int[0];
+        List<GltfNode> definitions = List.of(
+            new GltfNode("mesh", -1, empty, empty, -1, null, null, null, null, null),
+            new GltfNode("parent", -1, new int[]{2}, empty, -1, null, null, null, null, null),
+            new GltfNode("joint", 1, empty, empty, -1, null, null, null, null, null),
+            new GltfNode("unrelated", -1, empty, empty, -1, null, null, null, null, null));
+        GltfAsset asset = new GltfAsset(ResourceLocation.fromNamespaceAndPath("test", "incremental_skin"),
+            List.of(new GltfScene("scene", new int[]{0, 1, 3})), definitions, List.of(),
+            List.of(GltfMaterial.defaultMaterial()), List.of(), List.of(skin), List.of(), List.of(), List.of());
+        GltfNodeManager nodes = new GltfNodeManager(asset);
+        AnimationController animation = new AnimationController(asset);
+        nodes.node(2).translation(0.5f, 0.0f, 0.0f);
+        checkPalette(nodes, skin, animation, 2);
+        nodes.node(3).translation(1.0f, 2.0f, 3.0f);
+        checkPalette(nodes, skin, animation, 0);
+        nodes.node(2).translation(0.7f, 0.0f, 0.0f);
+        checkPalette(nodes, skin, animation, 1);
+        nodes.node(1).translation(0.37f, 0.2f, 0.8f);
+        checkPalette(nodes, skin, animation, 2);
+        nodes.node(0).scale(0.5f, 0.75f, 1.2f);
+        checkPalette(nodes, skin, animation, 2);
+        nodes.resetStates();
+        checkPalette(nodes, skin, animation, 2);
+
+        ModelPose writable = animation.pose();
+        writable.node(2).translation()[1] = 0.08f;
+        checkPalette(nodes, skin, animation, 2);
+        writable.node(2).translation()[1] = 0.52f;
+        checkPalette(nodes, skin, animation, 1);
+    }
+
+    private static void checkPalette(GltfNodeManager nodes, GltfSkin skin, AnimationController animation,
+                                     long expectedUpdates) {
+        long before = nodes.skinMatrixComputations();
+        float[] world = nodes.computeWorldMatricesView(animation);
+        float[] incremental = nodes.computeSkinPaletteView(skin, 0, world);
+        assertEquals(expectedUpdates, nodes.skinMatrixComputations() - before);
+        assertArrayEquals(PoseTransforms.computeSkinPalette(skin, 0, world), incremental, 1.0e-6f);
     }
 
     @Test

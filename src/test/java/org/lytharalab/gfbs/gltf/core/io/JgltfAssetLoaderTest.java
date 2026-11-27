@@ -4,6 +4,7 @@ import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 import org.lytharalab.gfbs.gltf.api.model.GltfAsset;
 import org.lytharalab.gfbs.gltf.api.model.GltfLabPbr;
+import org.lytharalab.gfbs.gltf.api.model.GltfSkin;
 import org.lytharalab.gfbs.gltf.api.io.GltfLoadLimits;
 import org.lytharalab.gfbs.gltf.core.animation.PoseTransforms;
 
@@ -12,6 +13,8 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -32,6 +35,75 @@ class JgltfAssetLoaderTest {
         GltfAsset asset = new JgltfAssetLoader().load(GLTF, ignored ->
             new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8)));
         assertTriangle(asset);
+    }
+
+    @Test
+    void importsUnsignedShortSkinSlotsAboveTheOldLimit() throws Exception {
+        int joints = GltfSkin.MAX_JOINTS;
+        byte[] source = skinJson(joints);
+        GltfAsset asset = new JgltfAssetLoader().load(GLTF, ignored -> new ByteArrayInputStream(source));
+        assertEquals(joints, asset.skins().get(0).jointCount());
+        assertEquals(joints - 1, asset.meshes().get(0).primitives().get(0).joints()[0]);
+        float[] palette = PoseTransforms.computeSkinPalette(
+            asset.skins().get(0), 0, PoseTransforms.computeBindMatrices(asset));
+        assertEquals(joints * 16, palette.length);
+        assertEquals(1.0f, palette[palette.length - 1]);
+
+        GltfLoadLimits limits = new GltfLoadLimits(16 * 1024 * 1024, 1024, 100_000);
+        var error = assertThrows(GltfLoadException.class,
+            () -> new JgltfAssetLoader(limits).load(GLTF, ignored -> new ByteArrayInputStream(source)));
+        assertTrue(error.getMessage().contains("Decoded glTF"));
+    }
+
+    @Test
+    void validatesTheUnsignedShortJointLimit() {
+        int limit = GltfSkin.MAX_JOINTS;
+        int[] joints = IntStream.range(0, limit).toArray();
+        assertEquals(65_536, new GltfSkin("max", -1, joints, new float[limit * 16]).jointCount());
+        assertThrows(IllegalArgumentException.class,
+            () -> new GltfSkin("over", -1, new int[limit + 1], new float[(limit + 1) * 16]));
+    }
+
+    @Test
+    void usesIdentityBindMatricesForASkinWithoutAccessors() throws Exception {
+        byte[] source = """
+            {"asset":{"version":"2.0"},"nodes":[{}],"skins":[{"joints":[0]}]}
+            """.getBytes(StandardCharsets.UTF_8);
+        GltfAsset asset = new JgltfAssetLoader().load(GLTF, ignored -> new ByteArrayInputStream(source));
+        assertArrayEquals(new float[]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1},
+            asset.skins().get(0).inverseBindMatrices());
+    }
+
+    private static byte[] skinJson(int jointCount) {
+        ByteBuffer buffer = ByteBuffer.allocate(72).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putFloat(0).putFloat(0).putFloat(0);
+        buffer.putFloat(1).putFloat(0).putFloat(0);
+        buffer.putFloat(0).putFloat(1).putFloat(0);
+        for (int vertex = 0; vertex < 3; vertex++) {
+            buffer.putShort((short) (jointCount - 1)).putShort((short) 0).putShort((short) 0).putShort((short) 0);
+        }
+        for (int vertex = 0; vertex < 3; vertex++) {
+            buffer.put((byte) 255).put((byte) 0).put((byte) 0).put((byte) 0);
+        }
+        String jointNodes = IntStream.rangeClosed(1, jointCount).mapToObj(Integer::toString)
+            .collect(Collectors.joining(","));
+        String json = """
+            {
+              "asset":{"version":"2.0"},
+              "buffers":[{"byteLength":72,"uri":"data:application/octet-stream;base64,%s"}],
+              "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+                             {"buffer":0,"byteOffset":36,"byteLength":24},
+                             {"buffer":0,"byteOffset":60,"byteLength":12}],
+              "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                           {"bufferView":1,"componentType":5123,"count":3,"type":"VEC4"},
+                           {"bufferView":2,"componentType":5121,"count":3,"type":"VEC4","normalized":true}],
+              "scenes":[{"nodes":[0,%s]}],
+              "nodes":[{"mesh":0,"skin":0}%s],
+              "skins":[{"joints":[%s]}],
+              "meshes":[{"primitives":[{"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2}}]}]
+            }
+            """.formatted(Base64.getEncoder().encodeToString(buffer.array()), jointNodes, ",{}".repeat(jointCount), jointNodes);
+        return json.getBytes(StandardCharsets.UTF_8);
     }
 
 

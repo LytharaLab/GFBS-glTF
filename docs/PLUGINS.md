@@ -1,6 +1,6 @@
 # GFBS: glTF plugin development
 
-GFBS: glTF 1.6.1 provides a dependency-aware plugin host and typed extension registry. A plugin is a
+GFBS: glTF 1.6.2 provides a dependency-aware plugin host and typed extension registry. A plugin is a
 logical component, not a JAR boundary: a normal Forge mod may publish one plugin or several plugins
 from the same JAR.
 
@@ -180,6 +180,10 @@ write this pass into its own mask target, call `frame.flush()`, and composite bl
 the same hook or `AFTER_RENDER`; no modification of `EntityGltfRenderer` or
 `GltfGeometryPipeline` is required. `flush()` returns `false` for a custom `MultiBufferSource`
 which does not expose Forge's normal `BufferSource` flush operation.
+
+Skinned custom passes use the same cached mesh-local CPU skinning and morph positions and normals
+as streamed built-in passes. Their own RenderTypes, vertex source, and light/tint settings apply
+when those vertices are submitted.
 
 During `BEFORE_BUILTIN_PASSES`, an extension may call `frame.suppress(BASE)`, `EMISSIVE`, or
 `SHADOW` and draw a replacement. Render and reload extensions that throw are logged and quarantined

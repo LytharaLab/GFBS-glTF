@@ -31,9 +31,17 @@ final class GltfGeometryPipeline {
                      MaterialPass pass, Matrix4f model, Matrix3f normalMatrix,
                      float[] skin, int jointCount, float[] morphWeights,
                      int packedLight, int packedOverlay, float alpha, GltfPrimitiveClusters.Section section) {
-        float[] positions = GltfPrimitiveAccess.positions(primitive);
-        float[] normals = GltfPrimitiveAccess.normals(primitive);
-        if (GltfVertexTransforms.hasActiveMorph(primitive, morphWeights)) {
+        emit(consumer, primitive, material, pass, model, normalMatrix, skin, jointCount, morphWeights,
+            packedLight, packedOverlay, alpha, section, null);
+    }
+
+    static void emit(VertexConsumer consumer, GltfPrimitive primitive, GltfMaterial material,
+                     MaterialPass pass, Matrix4f model, Matrix3f normalMatrix,
+                     float[] skin, int jointCount, float[] morphWeights, int packedLight, int packedOverlay,
+                     float alpha, GltfPrimitiveClusters.Section section, GltfCpuDeformationCache.Prepared prepared) {
+        float[] positions = prepared == null ? GltfPrimitiveAccess.positions(primitive) : prepared.positions();
+        float[] normals = prepared == null ? GltfPrimitiveAccess.normals(primitive) : prepared.normals();
+        if (prepared == null && GltfVertexTransforms.hasActiveMorph(primitive, morphWeights)) {
             positions = positions.clone();
             if (normals != null) normals = normals.clone();
             GltfVertexTransforms.applyMorphs(
@@ -53,8 +61,8 @@ final class GltfGeometryPipeline {
         if (ctx.consumer != null) ctx = new EmitContext();
         ctx.set(
             consumer, primitive, material, pass, model, normalMatrix, positions, normals,
-            uv0, uv1, colors, joints, weights, skin, jointCount, packedLight, packedOverlay,
-            alpha, cosine, sine
+            uv0, uv1, colors, joints, weights, prepared == null ? skin : null, jointCount, packedLight, packedOverlay,
+            alpha, cosine, sine, prepared != null && prepared.expanded()
         );
         try {
             if (section != null) {
@@ -172,7 +180,7 @@ final class GltfGeometryPipeline {
 
     private static void emitVertex(EmitContext ctx, int vertex, float[] generatedNormal, float dx, float dy,
                                    int corner) {
-        int position = vertex * 3;
+        int position = (ctx.expanded ? ctx.triangle * 3 + corner : vertex) * 3;
         float x = ctx.positions[position];
         float y = ctx.positions[position + 1];
         float z = ctx.positions[position + 2];
@@ -338,6 +346,7 @@ final class GltfGeometryPipeline {
         float cosine;
         float sine;
         boolean mirrored;
+        boolean expanded;
         int colorComponents;
         int triangle;
 
@@ -346,7 +355,7 @@ final class GltfGeometryPipeline {
             MaterialPass pass, Matrix4f model, Matrix3f normalMatrix, float[] positions,
             float[] normals, float[] uv0, float[] uv1, float[] colors, int[] joints,
             float[] weights, float[] skin, int jointCount, int packedLight, int packedOverlay,
-            float alpha, float cosine, float sine
+            float alpha, float cosine, float sine, boolean expanded
         ) {
             this.consumer = consumer;
             this.primitive = primitive;
@@ -368,6 +377,7 @@ final class GltfGeometryPipeline {
             this.alpha = alpha;
             this.cosine = cosine;
             this.sine = sine;
+            this.expanded = expanded;
             this.mirrored = model.determinant3x3() < 0.0f;
             this.colorComponents = colors == null ? 0 : colors.length / Math.max(1, positions.length / 3);
         }

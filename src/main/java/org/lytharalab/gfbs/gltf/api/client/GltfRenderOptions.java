@@ -13,9 +13,11 @@ import java.util.function.Predicate;
 public final class GltfRenderOptions {
     public enum CullMode { AUTO, FORCE_CULL, FORCE_NO_CULL }
     public enum LightMode { WORLD, FULLBRIGHT }
+    public enum SkinningMode { AUTO, CPU }
 
     private CullMode cullMode = CullMode.AUTO;
     private LightMode lightMode = LightMode.WORLD;
+    private SkinningMode skinningMode = SkinningMode.AUTO;
     private boolean frustumCulling = true;
     private boolean occlusionCulling;
     private boolean castShadows = true;
@@ -34,6 +36,7 @@ public final class GltfRenderOptions {
 
     public CullMode cullMode() { return cullMode; }
     public LightMode lightMode() { return lightMode; }
+    public SkinningMode skinningMode() { return skinningMode; }
     public boolean frustumCulling() { return frustumCulling; }
     public boolean occlusionCulling() { return occlusionCulling; }
     public boolean castShadows() { return castShadows; }
@@ -76,6 +79,12 @@ public final class GltfRenderOptions {
 
     public GltfRenderOptions light(LightMode mode) {
         lightMode = Objects.requireNonNull(mode, "mode");
+        return this;
+    }
+
+    /** AUTO uses GPU skinning for eligible draws. CPU always streams skinned vertices. */
+    public GltfRenderOptions skinning(SkinningMode mode) {
+        skinningMode = Objects.requireNonNull(mode, "mode");
         return this;
     }
 
@@ -165,6 +174,7 @@ public final class GltfRenderOptions {
         GltfRenderOptions copy = new GltfRenderOptions();
         copy.cullMode = cullMode;
         copy.lightMode = lightMode;
+        copy.skinningMode = skinningMode;
         copy.frustumCulling = frustumCulling;
         copy.occlusionCulling = occlusionCulling;
         copy.castShadows = castShadows;

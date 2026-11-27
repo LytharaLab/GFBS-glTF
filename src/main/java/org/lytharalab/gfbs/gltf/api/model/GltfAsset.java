@@ -199,7 +199,7 @@ public final class GltfAsset {
         for (int skinIndex = 0; skinIndex < skins.size(); skinIndex++) {
             GltfSkin skin = skins.get(skinIndex);
             requireOptionalIndex(skin.skeletonRoot(), nodes.size(), "skeleton root", skinIndex);
-            for (int joint : skin.joints()) requireIndex(joint, nodes.size(), "skin joint", skinIndex);
+            for (int joint : skin.jointsView()) requireIndex(joint, nodes.size(), "skin joint", skinIndex);
         }
         for (int animationIndex = 0; animationIndex < animations.size(); animationIndex++) {
             java.util.HashSet<String> animatedTargets = new java.util.HashSet<>();
@@ -240,18 +240,16 @@ public final class GltfAsset {
         for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
             GltfNode node = nodes.get(nodeIndex);
             if (node.skin() < 0) continue;
-            int jointCount = skins.get(node.skin()).joints().length;
-            for (int meshIndex : node.meshes()) {
+            int jointCount = skins.get(node.skin()).jointCount();
+            for (int slot = 0; slot < node.meshCount(); slot++) {
+                int meshIndex = node.mesh(slot);
                 for (GltfPrimitive primitive : meshes.get(meshIndex).primitives()) {
-                    int[] joints = primitive.joints();
-                    float[] weights = primitive.weights();
-                    if (joints == null || weights == null) {
+                    int highestJoint = primitive.maxJointIndex();
+                    if (highestJoint < 0) {
                         throw new IllegalArgumentException("Skinned node " + nodeIndex + " uses a primitive without JOINTS_0/WEIGHTS_0");
                     }
-                    for (int joint : joints) {
-                        if (joint >= jointCount) {
-                            throw new IllegalArgumentException("Primitive joint index " + joint + " exceeds skin joint count " + jointCount);
-                        }
+                    if (highestJoint >= jointCount) {
+                        throw new IllegalArgumentException("Primitive joint index " + highestJoint + " exceeds skin joint count " + jointCount);
                     }
                 }
             }

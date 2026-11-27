@@ -60,6 +60,19 @@ minecraft {
             property 'forge.enabledGameTestNamespaces', mod_id
         }
 
+        gpuSkinningTest {
+            parent runs.client
+            client true
+            workingDirectory layout.buildDirectory.dir('gpu-skinning-test').get().asFile
+            property 'gfbs.gltf.gpuSkinningTest', 'true'
+            property 'forge.logging.console.level', 'info'
+            mods {
+                "${mod_id}" {
+                    source sourceSets.test
+                }
+            }
+        }
+
         server {
             property 'forge.enabledGameTestNamespaces', mod_id
             args '--nogui'

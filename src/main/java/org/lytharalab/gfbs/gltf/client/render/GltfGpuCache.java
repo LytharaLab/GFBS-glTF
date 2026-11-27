@@ -25,6 +25,7 @@ public final class GltfGpuCache {
     static long frame() { return frame; }
     static boolean hasGeometrySpace(long bytes) { return geometryBytes + bytes <= 512L * 1024 * 1024; }
     static void geometryAllocated(long bytes) { geometryBytes += bytes; }
+    static long residentGeometryBytes() { return geometryBytes; }
 
     public static void prepareScene(GltfAsset asset, int scene) {
         java.util.Objects.checkIndex(scene, asset.scenes().size());
@@ -33,6 +34,9 @@ public final class GltfGpuCache {
 
     public void onRenderTick(TickEvent.RenderTickEvent event) {
         if (event.phase != TickEvent.Phase.END || ++frame % 60 != 0) return;
+        GltfCpuDeformationCache.releaseCold(frame);
+        GltfGpuSkinning.releaseCold(frame);
+        GltfGpuDeformationPool.releaseCold(frame);
         var entries = models.values().iterator();
         while (entries.hasNext()) {
             GltfGpuModel model = entries.next();
@@ -54,6 +58,7 @@ public final class GltfGpuCache {
 
     public void remove(ResourceLocation id) {
         runOnRenderThread(() -> {
+            GltfCpuDeformationCache.remove(id);
             Iterator<Map.Entry<GltfAsset, GltfGpuModel>> iterator = models.entrySet().iterator();
             while (iterator.hasNext()) {
                 Map.Entry<GltfAsset, GltfGpuModel> entry = iterator.next();
@@ -71,6 +76,9 @@ public final class GltfGpuCache {
             GltfGpuModel[] staleModels = models.values().toArray(GltfGpuModel[]::new);
             models.clear();
             for (GltfGpuModel model : staleModels) deleteSafely(model);
+            GltfCpuDeformationCache.clear();
+            GltfGpuSkinning.clear();
+            GltfGpuDeformationPool.clear();
             GltfOcclusionCuller.INSTANCE.dispose();
         });
     }

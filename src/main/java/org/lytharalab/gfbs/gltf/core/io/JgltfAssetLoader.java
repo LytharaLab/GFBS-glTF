@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import de.javagl.jgltf.impl.v2.Accessor;
+import de.javagl.jgltf.impl.v2.GlTF;
 import de.javagl.jgltf.model.*;
 import de.javagl.jgltf.model.AnimationModel.Channel;
 import de.javagl.jgltf.model.io.GltfAssetReader;
@@ -72,9 +74,10 @@ public final class JgltfAssetLoader {
             GltfAssetReader reader = new GltfAssetReader();
             de.javagl.jgltf.model.io.GltfAsset parsed = reader.readWithoutReferences(
                 new ByteArrayInputStream(normalizedBytes));
-            if (!(parsed.getGltf() instanceof de.javagl.jgltf.impl.v2.GlTF)) {
+            if (!(parsed.getGltf() instanceof GlTF gltf)) {
                 throw new GltfLoadException(id, "Only glTF 2.0 assets are supported");
             }
+            BitSet implicitInverseBinds = prepareSkinDefinitions(id, gltf);
             GltfReferenceResolver.resolveAll(parsed.getReferences(), uri -> {
                 try {
                     if (isDataUri(uri)) return decodeDataUri(uri, budget);
@@ -86,9 +89,8 @@ public final class JgltfAssetLoader {
                     throw new ReferenceResolutionException(exception);
                 }
             });
-            de.javagl.jgltf.impl.v2.GlTF gltf = (de.javagl.jgltf.impl.v2.GlTF) parsed.getGltf();
             int defaultScene = gltf.getScene() == null ? 0 : gltf.getScene();
-            return convert(id, GltfModels.create(parsed), defaultScene, jsonRoot);
+            return convert(id, GltfModels.create(parsed), defaultScene, jsonRoot, implicitInverseBinds);
         } catch (ReferenceResolutionException exception) {
             Throwable cause = exception.getCause();
             String message = message(cause);
@@ -102,7 +104,7 @@ public final class JgltfAssetLoader {
     }
 
     private GltfAsset convert(ResourceLocation id, GltfModel source, int defaultScene,
-                              ObjectNode jsonRoot) throws GltfLoadException {
+                              ObjectNode jsonRoot, BitSet implicitInverseBinds) throws GltfLoadException {
         List<NodeModel> sourceNodes = source.getNodeModels();
         List<MeshModel> sourceMeshes = source.getMeshModels();
         List<TextureModel> sourceTextures = source.getTextureModels();
@@ -119,7 +121,7 @@ public final class JgltfAssetLoader {
         if (channelCount > MAX_ANIMATION_CHANNELS) {
             throw new GltfLoadException(id, "Asset contains too many animation channels: " + channelCount);
         }
-        validateRuntimeArrayBudget(id, source, jsonRoot.get("nodes"));
+        validateRuntimeArrayBudget(id, source, jsonRoot.get("nodes"), implicitInverseBinds);
 
         ExtensionsModel extensions = source.getExtensionsModel();
         List<String> used = extensions == null ? List.of() : extensions.getExtensionsUsed();
@@ -150,7 +152,7 @@ public final class JgltfAssetLoader {
         List<GltfNode> nodes = convertNodes(sourceNodes, nodeIds, meshIds, skinIds, meshes,
             jsonRoot.get("nodes"), source.getAccessorModels(), limits.nodes());
         List<GltfScene> scenes = convertScenes(source.getSceneModels(), nodeIds, nodes);
-        List<GltfSkin> skins = convertSkins(source.getSkinModels(), nodeIds);
+        List<GltfSkin> skins = convertSkins(source.getSkinModels(), nodeIds, implicitInverseBinds);
         List<AnimationClip> animations = convertAnimations(sourceAnimations, nodeIds);
         if (!scenes.isEmpty() && (defaultScene < 0 || defaultScene >= scenes.size())) {
             throw new GltfLoadException(id, "Default scene index is out of range: " + defaultScene);
@@ -476,20 +478,58 @@ public final class JgltfAssetLoader {
         return result;
     }
 
+    private static BitSet prepareSkinDefinitions(ResourceLocation id, GlTF gltf) throws GltfLoadException {
+        BitSet implicitInverseBinds = new BitSet();
+        var skins = gltf.getSkins();
+        if (skins == null) return implicitInverseBinds;
+        int accessorCount = gltf.getAccessors() == null ? 0 : gltf.getAccessors().size();
+        for (int i = 0; i < skins.size(); i++) {
+            var skin = skins.get(i);
+            requireCount(id, "joints per skin", skin.getJoints().size(), GltfSkin.MAX_JOINTS);
+            Integer inverse = skin.getInverseBindMatrices();
+            if (inverse == null) implicitInverseBinds.set(i);
+            else if (inverse < 0 || inverse >= accessorCount) {
+                throw new GltfLoadException(id, "Invalid inverse bind accessor " + inverse + " for skin " + i);
+            }
+        }
+        if (implicitInverseBinds.isEmpty()) return implicitInverseBinds;
+
+        // JglTF 2.0.4 unboxes this optional index while creating its model. Give it a valid
+        // placeholder, then supply the spec's identity matrices during GFBS conversion.
+        if (accessorCount == 0) {
+            Accessor placeholder = new Accessor();
+            placeholder.setType("MAT4");
+            placeholder.setComponentType(5126);
+            placeholder.setCount(1);
+            gltf.addAccessors(placeholder);
+        }
+        for (int i = implicitInverseBinds.nextSetBit(0); i >= 0; i = implicitInverseBinds.nextSetBit(i + 1)) {
+            skins.get(i).setInverseBindMatrices(0);
+        }
+        return implicitInverseBinds;
+    }
+
     private static List<GltfSkin> convertSkins(List<SkinModel> sources,
-                                                IdentityHashMap<NodeModel, Integer> nodeIds) {
+                                               IdentityHashMap<NodeModel, Integer> nodeIds, BitSet implicitInverseBinds) {
         List<GltfSkin> result = new ArrayList<>(sources.size());
-        for (SkinModel skin : sources) {
-            requireOptionalElementType(skin.getInverseBindMatrices(), "inverse bind matrices", ElementType.MAT4);
+        for (int index = 0; index < sources.size(); index++) {
+            SkinModel skin = sources.get(index);
+            AccessorModel bind = implicitInverseBinds.get(index) ? null : skin.getInverseBindMatrices();
+            requireOptionalElementType(bind, "inverse bind matrices", ElementType.MAT4);
             int[] joints = ids(skin.getJoints(), nodeIds);
-            if (joints.length > GltfSkin.MAX_JOINTS) {
-                throw new IllegalArgumentException("Skin has " + joints.length
-                    + " joints; GFBS:glTF supports at most " + GltfSkin.MAX_JOINTS + " joints per skin");
+            if (bind != null && bind.getCount() < joints.length) {
+                throw new IllegalArgumentException("Inverse bind matrix count is smaller than the joint count");
             }
             float[] inverse = new float[joints.length * 16];
-            for (int i = 0; i < joints.length; i++) {
-                float[] matrix = skin.getInverseBindMatrices() == null ? identity() : skin.getInverseBindMatrix(i, null);
-                System.arraycopy(matrix, 0, inverse, i * 16, 16);
+            if (bind == null) {
+                for (int i = 0; i < inverse.length; i += 16) {
+                    inverse[i] = inverse[i + 5] = inverse[i + 10] = inverse[i + 15] = 1.0f;
+                }
+            } else {
+                if (!(bind.getAccessorData() instanceof AccessorFloatData values)) {
+                    throw new IllegalArgumentException("Inverse bind matrices must use floating-point components");
+                }
+                for (int i = 0; i < inverse.length; i++) inverse[i] = values.get(i);
             }
             result.add(new GltfSkin(skin.getName(), id(nodeIds, skin.getSkeleton()), joints, inverse));
         }
@@ -531,7 +571,7 @@ public final class JgltfAssetLoader {
 
 
     private void validateRuntimeArrayBudget(ResourceLocation id, GltfModel source,
-                                            JsonNode nodes) throws GltfLoadException {
+                                            JsonNode nodes, BitSet implicitInverseBinds) throws GltfLoadException {
         long components = 0;
         try {
             for (MeshModel mesh : source.getMeshModels()) {
@@ -549,8 +589,14 @@ public final class JgltfAssetLoader {
                     }
                 }
             }
-            for (SkinModel skin : source.getSkinModels()) {
-                components = addAccessorComponents(components, skin.getInverseBindMatrices());
+            List<SkinModel> skins = source.getSkinModels();
+            for (int index = 0; index < skins.size(); index++) {
+                SkinModel skin = skins.get(index);
+                int joints = skin.getJoints().size();
+                components = Math.addExact(components, joints);
+                AccessorModel bind = implicitInverseBinds.get(index) ? null : skin.getInverseBindMatrices();
+                components = bind == null ? Math.addExact(components, (long) joints * 16)
+                    : addAccessorComponents(components, bind);
             }
             for (AnimationModel animation : source.getAnimationModels()) {
                 for (Channel channel : animation.getChannels()) {
@@ -926,10 +972,6 @@ public final class JgltfAssetLoader {
         if (throwable == null) return "Unknown loading error";
         String message = throwable.getMessage();
         return message == null || message.isBlank() ? throwable.getClass().getSimpleName() : message;
-    }
-
-    private static float[] identity() {
-        return new float[]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     }
 
     private static final class ReferenceResolutionException extends RuntimeException {

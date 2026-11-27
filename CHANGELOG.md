@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.6.2
+
+- Add automatic GPU skeletal skinning for built-in opaque and cutout triangles on the vanilla
+  client pipeline. Share resident vertex and index buffers per immutable primitive across
+  instances, poses, and material variants.
+- Raise the asset limit from 48 to 65,536 joints per skin. Compact the GPU palette to the
+  positively weighted joints in each primitive and use CPU skinning when a draw is incompatible
+  with the GPU backend. Support glTF skins that omit inverse bind matrices.
+- Recompute joint palette matrices only when their world transforms change. Cache CPU-skinned
+  vertices and morph results across base, emissive, shadow, and custom passes. Heavier eligible
+  GPU draws can capture their deformation once for both the base and emissive passes.
+- Add `GltfRenderOptions.skinning(...)`, `GltfRenderer.maxGpuSkinningJoints()`,
+  `GltfRenderer.verifySkinning(...)`, and opt-in render diagnostics.
+- Add import regression tests and a Forge client acceptance task for GPU readback, framebuffer
+  comparison, cache reuse, and resource reload.
+
 ## 1.6.1
 
 ### Fixed

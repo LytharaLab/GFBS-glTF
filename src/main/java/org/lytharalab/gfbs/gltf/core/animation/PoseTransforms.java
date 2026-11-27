@@ -66,8 +66,7 @@ public final class PoseTransforms {
     }
 
     public static float[] computeSkinPalette(GltfSkin skin, int meshNode, float[] worldMatrices) {
-        int joints = GltfSkinAccess.joints(skin).length;
-        float[] palette = new float[Math.multiplyExact(joints, 16)];
+        float[] palette = new float[skin.jointCount() * 16];
         computeSkinPaletteInto(skin, meshNode, worldMatrices, palette);
         return palette;
     }
@@ -75,34 +74,44 @@ public final class PoseTransforms {
     /** Allocation-free skin palette writer used by per-instance renderer caches. */
     public static void computeSkinPaletteInto(GltfSkin skin, int meshNode, float[] worldMatrices,
                                               float[] output) {
+        updateSkinPaletteInto(skin, meshNode, worldMatrices, null, output, null, 0);
+    }
+
+    /** Writes selected joints in palette order. A null change array forces a full update. */
+    public static int updateSkinPaletteInto(GltfSkin skin, int meshNode, float[] worldMatrices,
+                                             int[] jointSlots, float[] output, long[] changes, long previousRevision) {
         int[] joints = GltfSkinAccess.joints(skin);
         float[] inverseBind = GltfSkinAccess.inverseBindMatrices(skin);
-        if (meshNode < 0 || meshNode * 16 + 16 > worldMatrices.length) {
+        int worldCount = worldMatrices.length / 16;
+        int count = jointSlots == null ? joints.length : jointSlots.length;
+        if (meshNode < 0 || meshNode >= worldCount) {
             throw new IndexOutOfBoundsException("matrix index " + meshNode);
         }
-        if (output.length < Math.multiplyExact(joints.length, 16)) {
+        if (output.length / 16 < count) {
             throw new IllegalArgumentException("Skin palette output is too small");
         }
 
         SkinScratch scratch = SKIN_SCRATCH.get();
-        scratch.inverseMesh.set(worldMatrices, meshNode * 16);
-        if (Math.abs(scratch.inverseMesh.determinant()) > 1.0e-10f) {
-            scratch.inverseMesh.invert();
-        } else {
-            // A zero-scale animation can make the mesh transform singular. The mesh itself is
-            // collapsed in this state, so an identity inverse is a safe, non-crashing fallback.
-            scratch.inverseMesh.identity();
-        }
-        for (int i = 0; i < joints.length; i++) {
-            int jointOffset = Math.multiplyExact(joints[i], 16);
-            if (jointOffset < 0 || jointOffset + 16 > worldMatrices.length) {
-                throw new IndexOutOfBoundsException("matrix index " + joints[i]);
+        int updated = 0;
+        for (int i = 0; i < count; i++) {
+            int slot = jointSlots == null ? i : jointSlots[i];
+            int joint = joints[slot];
+            if (joint >= worldCount) throw new IndexOutOfBoundsException("matrix index " + joint);
+            if (changes != null && changes[joint] <= previousRevision) continue;
+            if (updated == 0) {
+                scratch.inverseMesh.set(worldMatrices, meshNode * 16);
+                float determinant = scratch.inverseMesh.determinant();
+                // A zero-scale mesh has no inverse. Keep the same fallback for both backends.
+                if (Float.isFinite(determinant) && Math.abs(determinant) > 1.0e-10f) scratch.inverseMesh.invert();
+                else scratch.inverseMesh.identity();
             }
-            scratch.joint.set(worldMatrices, jointOffset);
-            scratch.bind.set(inverseBind, i * 16);
+            scratch.joint.set(worldMatrices, joint * 16);
+            scratch.bind.set(inverseBind, slot * 16);
             scratch.result.set(scratch.inverseMesh).mul(scratch.joint).mul(scratch.bind);
             scratch.result.get(output, i * 16);
+            updated++;
         }
+        return updated;
     }
 
     public static float[] localMatrix(GltfNode node, NodePose pose) {
